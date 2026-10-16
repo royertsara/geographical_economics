@@ -1,0 +1,47 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+# Packages
+```{r}
+library(tidyverse)
+library(readr)
+library(sf)
+```
+
+# Data
+
+**contour_iris**: découpage géographique des quartiers de la commune Nantes (44109)
+```{r}
+
+fastfood<-st_read("fastfood_nantes.geojson")
+contours_iris<-st_read("iris_nantes.geojson")
+```
+```{r}
+plot(st_geometry(contours_iris), main = "Vérification spatiale")
+plot(st_geometry(fastfood), col = "red", pch = 20, add = TRUE)
+```
+
+
+
+
+# Spatial join
+```{r}
+iris_ff_join<-st_join(contours_iris,fastfood,join=st_intersects)
+
+# Indicateurs 
+iris_ff_indicateurs<-iris_ff_join |> 
+  group_by(ID,NOM_IRIS) |> 
+  summarise(
+    nb_fastfoods=sum(!is.na(SIRET)),# Nb de Fastfoods par quartier 
+  geometry=first(geometry),
+  .groups="drop") |> 
+  st_as_sf() |> 
+  mutate(
+    superficie_km2=as.numeric(st_area(geometry))/1e6, # Superficie en Km2 du quartier
+    densite_fastfood_km2=nb_fastfoods/superficie_km2) |> # Densité de fastfood par km2
+  st_drop_geometry()
+  
+```
+
