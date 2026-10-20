@@ -29,12 +29,17 @@ plot(st_geometry(entreprises), col = "red", pch = 20, add = TRUE)
 
 # Spatial join and indicators
 ```{r}
-iris_ff_join<-st_join(contours_iris,entreprises,join=st_intersects)
+
+# Calcul superficie
+contours_iris_clean<-contours_iris |> 
+  mutate(superficie_km2=as.numeric(st_area(geometry)) / 1e6)
+
+#Jointure spatial
+iris_ff_join<-st_join(contours_iris_clean,entreprises,join=st_intersects)
 
 # Indicateurs 
-iris_ff_indicateurs<-iris_ff_join |> 
-  mutate(
-    superficie_km2=as.numeric(st_area(geometry))/1e6) |> 
+iris_stats_indicateurs<-iris_ff_join |> 
+  st_drop_geometry()|> 
   group_by(ID,NOM_IRIS) |> 
   summarise(
     
@@ -57,9 +62,14 @@ iris_ff_indicateurs<-iris_ff_join |>
     population=first(population),
     med_uc=first(med_uc),
     taux_pauv=first(taux_pauv),
-    geometry=first(geometry),
     superficie_km2=first(superficie_km2),
-  .groups="drop") |> 
+  .groups="drop")
+
+
+# Jointure porpre avec la géométrie d'origine
+iris_ff_indicateurs<-contours_iris_clean|>
+  select(ID,geometry) |> 
+  inner_join(iris_stats_indicateurs,by="ID") |> 
   mutate(
     densite_pop=population/superficie_km2,
     densite_resto = nb_resto / superficie_km2,
