@@ -3,7 +3,9 @@ title: "Untitled"
 format: html
 editor: visual
 ---
+
 # Packages
+
 ```{r}
 #| message: false
 library(tidyverse)
@@ -14,20 +16,20 @@ library(sf)
 # Data
 
 **contour_iris**: découpage géographique des quartiers de la commune Nantes (44109)
+
 ```{r}
 
 entreprises<-st_read("entreprises_nantes.geojson")
 contours_iris<-st_read("iris_nantesv2.geojson")
 ```
+
 ```{r}
 plot(st_geometry(contours_iris), main = "Répartition des entreprises dans la commune de Nantes")
 plot(st_geometry(entreprises), col = "red", pch = 20, add = TRUE)
 ```
 
-
-
-
 # Spatial join and indicators
+
 ```{r}
 
 # Calcul superficie
@@ -81,4 +83,3 @@ iris_ff_indicateurs<-contours_iris_clean|>
 
   
 ```
-
