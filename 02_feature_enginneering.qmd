@@ -5,6 +5,7 @@ editor: visual
 ---
 # Packages
 ```{r}
+#| message: false
 library(tidyverse)
 library(readr)
 library(sf)
@@ -15,33 +16,59 @@ library(sf)
 **contour_iris**: découpage géographique des quartiers de la commune Nantes (44109)
 ```{r}
 
-fastfood<-st_read("fastfood_nantes.geojson")
-contours_iris<-st_read("iris_nantes.geojson")
+entreprises<-st_read("entreprises_nantes.geojson")
+contours_iris<-st_read("iris_nantesv2.geojson")
 ```
 ```{r}
-plot(st_geometry(contours_iris), main = "Vérification spatiale")
-plot(st_geometry(fastfood), col = "red", pch = 20, add = TRUE)
+plot(st_geometry(contours_iris), main = "Répartition des entreprises dans la commune de Nantes")
+plot(st_geometry(entreprises), col = "red", pch = 20, add = TRUE)
 ```
 
 
 
 
-# Spatial join
+# Spatial join and indicators
 ```{r}
-iris_ff_join<-st_join(contours_iris,fastfood,join=st_intersects)
+iris_ff_join<-st_join(contours_iris,entreprises,join=st_intersects)
 
 # Indicateurs 
 iris_ff_indicateurs<-iris_ff_join |> 
+  mutate(
+    superficie_km2=as.numeric(st_area(geometry))/1e6) |> 
   group_by(ID,NOM_IRIS) |> 
   summarise(
-    nb_fastfoods=sum(!is.na(SIRET)),# Nb de Fastfoods par quartier 
-  geometry=first(geometry),
+    
+    # Indicateurs cibles (restaurants: rapides+tradi)
+    nb_resto=n_distinct(SIRET[code_naf %in% c("56.10C","56.10A")],na.rm=TRUE),
+    nb_resto_rapides=n_distinct(SIRET[code_naf=="56.10C"],na.rm=TRUE),
+    nb_resto_tradi=n_distinct(SIRET[code_naf=="56.10A"],na.rm=TRUE),
+    
+    # Indicateur global d'attractivité commerciale (Commerces + Bars + Coiffure/Beauté)
+    nb_commerces_total = n_distinct(
+      SIRET[
+        str_starts(code_naf, "47") |                  # Tout le commerce de détail
+        code_naf == "56.30Z"      |                  # Les bars / débits de boissons
+        str_starts(code_naf, "96.02")                # Salons de coiffure et soins de beauté
+      ], 
+      na.rm = TRUE
+    ),
+    
+    # Indicateurs socio-démographique
+    population=first(population),
+    med_uc=first(med_uc),
+    taux_pauv=first(taux_pauv),
+    geometry=first(geometry),
+    superficie_km2=first(superficie_km2),
   .groups="drop") |> 
-  st_as_sf() |> 
   mutate(
-    superficie_km2=as.numeric(st_area(geometry))/1e6, # Superficie en Km2 du quartier
-    densite_fastfood_km2=nb_fastfoods/superficie_km2) |> # Densité de fastfood par km2
-  st_drop_geometry()
+    densite_pop=population/superficie_km2,
+    densite_resto = nb_resto / superficie_km2,
+    deniste_resto_rapide=nb_resto_rapides/superficie_km2,
+    densite_resto_tradi=nb_resto_tradi/superficie_km2,
+    densite_commerce = nb_commerces_total / superficie_km2,
+  ) |> 
+  st_as_sf()
+
   
 ```
 
