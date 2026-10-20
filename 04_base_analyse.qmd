@@ -1,0 +1,43 @@
+---
+title: "Base d'analyse"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(fixest)
+```
+
+# Data
+
+**iris_ff_indicateurs** : fast-foods par quartier (02_feature_enginneering.qmd)
+
+**transport_iris** : arrêts et lignes par quartier (03_transport_iris.qmd)
+
+```{r}
+iris_ff_indicateurs <- readRDS("iris_restos_indicateurs.rds")
+transport_iris      <- readRDS("transport_iris.rds")
+```
+
+# Jointure
+
+```{r}
+base <- iris_ff_indicateurs |> 
+  mutate(CODE_IRIS = str_sub(ID, -9)) |> # Code du quartier = 9 derniers caractères de ID
+  left_join(transport_iris |> select(-NOM_IRIS), by = "CODE_IRIS")
+
+base <- st_drop_geometry(base)
+base <- base |> select(-CODE_IRIS)
+nrow(base) # 97 quartiers
+summary(base)
+```
+
+# Estimation
+
+```{r}
+
+```
+

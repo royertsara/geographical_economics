@@ -1,0 +1,127 @@
+---
+title: "Transports par quartier"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(readr)
+library(sf)
+library(data.table)
+library(here)
+```
+
+# Data
+
+**GTFS Naolib** : fichiers du réseau de transport de Nantes Métropole, téléchargés automatiquement dans le dossier `gtfs/` s'ils sont absents. Ce dossier (546 Mo) n'est pas versionné sur GitHub.
+
+**contours_iris** : découpage géographique des quartiers de la commune Nantes (44109)
+
+```{r}
+url_gtfs <- "https://data.nantesmetropole.fr/explore/dataset/244400404_transports_commun_naolib_nantes_metropole_gtfs/files/0cc0469a72de54ee045cb66d1a21de9e/download/"
+
+fichiers_gtfs <- c("stops.txt", "routes.txt", "trips.txt", "stop_times.txt")
+
+if (!file.exists(here("gtfs", "stop_times.txt"))) {
+  options(timeout = 1200) # Fichier volumineux
+  dir.create(here("gtfs"), showWarnings = FALSE)
+  download.file(url_gtfs, here("gtfs.zip"), mode = "wb")
+  unzip(here("gtfs.zip"), files = fichiers_gtfs, exdir = here("gtfs"))
+  file.remove(here("gtfs.zip"))
+}
+```
+
+```{r}
+stops  <- read_csv(here("gtfs", "stops.txt"),  col_types = cols(stop_id = "c", parent_station = "c"))
+routes <- read_csv(here("gtfs", "routes.txt"), col_types = cols(route_id = "c"))
+trips  <- read_csv(here("gtfs", "trips.txt"),  col_types = cols(.default = "c"))
+stop_times <- fread(here("gtfs", "stop_times.txt"), select = c("trip_id", "stop_id"),
+                    colClasses = "character")
+
+contours_iris <- st_read(here("iris_nantesv2.geojson"))
+```
+
+# Arrêts géolocalisés
+
+```{r}
+arrets <- stops |> 
+  filter(is.na(location_type) | location_type == 0) |> # Points d'arrêt (quais)
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326) |> 
+  st_transform(2154)
+```
+
+```{r}
+plot(st_geometry(contours_iris), main = "Vérification spatiale")
+plot(st_geometry(arrets), col = "blue", pch = 20, cex = 0.4, add = TRUE)
+```
+
+# Lignes par arrêt
+
+```{r}
+lignes_arret <- unique(stop_times) |> 
+  as_tibble() |> 
+  left_join(trips |> select(trip_id, route_id), by = "trip_id") |> 
+  distinct(stop_id, route_id) |> 
+  left_join(routes |> select(route_id, route_type), by = "route_id") # 0 = tram, 3 = bus
+
+rm(stop_times); gc()
+```
+
+# Spatial join
+
+```{r}
+arrets_iris <- st_join(arrets, contours_iris |> select(CODE_IRIS), join = st_intersects) |> 
+  st_drop_geometry() |> 
+  filter(!is.na(CODE_IRIS)) # Arrêts situés dans Nantes
+```
+
+# Indicateurs
+
+```{r}
+nb_arrets_iris <- arrets_iris |> 
+  group_by(CODE_IRIS) |> 
+  summarise(nb_arrets = n_distinct(stop_name)) # Nb d'arrêts par quartier
+
+nb_lignes_iris <- arrets_iris |> 
+  select(CODE_IRIS, stop_id) |> 
+  inner_join(lignes_arret, by = "stop_id", relationship = "many-to-many") |> 
+  group_by(CODE_IRIS) |> 
+  summarise(
+    nb_lignes      = n_distinct(route_id),                    # Nb de lignes différentes par quartier
+    nb_lignes_tram = n_distinct(route_id[route_type == 0]))  # Nb de lignes de tram par quartier
+
+transport_iris <- contours_iris |> 
+  st_drop_geometry() |> 
+  select(CODE_IRIS, NOM_IRIS) |> 
+  left_join(nb_arrets_iris, by = "CODE_IRIS") |> 
+  left_join(nb_lignes_iris, by = "CODE_IRIS") |> 
+  mutate(across(c(nb_arrets, nb_lignes, nb_lignes_tram), ~ replace_na(.x, 0))) # 0 si aucun arrêt
+
+summary(transport_iris)
+```
+
+# Proximité : distance au centre du quartier
+
+```{r}
+centres_iris <- st_point_on_surface(contours_iris) # Point au centre de chaque quartier
+
+arret_proche <- st_nearest_feature(centres_iris, arrets) # Arrêt le plus proche (Nantes et communes voisines)
+
+distance_iris <- tibble(
+  CODE_IRIS = centres_iris$CODE_IRIS,
+  dist_arret_m = as.numeric(st_distance(centres_iris, arrets[arret_proche, ], by_element = TRUE))) # Distance en mètres
+
+transport_iris <- transport_iris |> 
+  left_join(distance_iris, by = "CODE_IRIS")
+
+summary(transport_iris$dist_arret_m)
+```
+
+# Sauvegarde
+
+```{r}
+saveRDS(transport_iris, here("transport_iris.rds"))
+```
