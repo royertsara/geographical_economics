@@ -83,3 +83,8 @@ iris_ff_indicateurs<-contours_iris_clean|>
 
   
 ```
+
+```{r}
+saveRDS(iris_ff_indicateurs, "iris_restos_indicateurs.rds")
+```
+

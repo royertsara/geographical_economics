@@ -9,6 +9,7 @@ editor: visual
 ```{r}
 library(tidyverse)
 library(fixest)
+library(sf)
 ```
 
 # Data
@@ -32,12 +33,19 @@ base <- iris_ff_indicateurs |>
 base <- st_drop_geometry(base)
 base <- base |> select(-CODE_IRIS)
 nrow(base) # 97 quartiers
-summary(base)
+ncol(base) # 20 indicateurs 
+```
+# Analyse descriptive: 
+
+## 3.1 
+```{r}
+
 ```
 
-# Estimation
+## 3.2
 
 ```{r}
 
 ```
 
+## 4. Modèles
