@@ -79,8 +79,8 @@ print(prop_resto)
 # les quartiers avec le plus d'Offres:
 base |> 
   st_drop_geometry() |> 
-  select(NOM_IRIS,nb_resto) |> 
-  slice_max(nb_resto,n=5)
+  select(NOM_IRIS,nb_resto_rapides) |> 
+  slice_max(nb_resto_rapides,n=5)
 ```
 
 ```{r}
@@ -295,10 +295,4 @@ base |>
   theme_void()
 ```
 
-## 3.2
 
-```{r}
-
-```
-
-## 4. Modèles
