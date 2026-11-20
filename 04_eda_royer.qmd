@@ -1,0 +1,298 @@
+---
+title: "Base d'analyse"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(fixest)
+library(sf)
+library(corrplot)
+```
+
+# Data
+
+**iris_ff_indicateurs** : fast-foods par quartier (02_feature_enginneering.qmd)
+
+**transport_iris** : arrêts et lignes par quartier (03_transport_iris.qmd)
+
+```{r}
+iris_ff_indicateurs <- readRDS("iris_restos_indicateurs.rds")
+transport_iris      <- readRDS("transport_iris.rds")
+```
+
+# Jointure
+
+```{r}
+base <- iris_ff_indicateurs |> 
+  mutate(CODE_IRIS = str_sub(ID, -9)) |> # Code du quartier = 9 derniers caractères de ID
+  left_join(transport_iris |> select(-NOM_IRIS), by = "CODE_IRIS")
+
+
+base <- base |> select(-CODE_IRIS)
+nrow(base) # 97 quartiers
+ncol(base) # 21 indicateurs 
+```
+# Analyse descriptive: 
+
+## 3.1 
+
+### 3.1.1 Statistiques descriptives 
+```{r}
+
+options(scipen = 999)
+base |> 
+  st_drop_geometry() |> 
+  select(nb_resto,nb_resto_rapides,nb_resto_tradi,nb_commerces_total,population,taux_pauv,med_uc,dist_centre_km,superficie_km2) |>
+  select(where(is.numeric), -any_of("ID")) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valeur") |>
+  group_by(variable) |>
+  summarise(
+    moy = mean(valeur, na.rm = TRUE),
+    med = median(valeur, na.rm = TRUE),
+    sd=sd(valeur,na.rm=TRUE),
+    min = min(valeur, na.rm = TRUE),
+    max = max(valeur, na.rm = TRUE),
+    Na=sum(is.na(valeur)),
+    .groups = "drop"
+  ) |> 
+  mutate(across(c(moy,med,sd,min,max,Na), ~round(.x, 2)))
+
+  
+```
+
+```{r}
+# Offre de restauration rapide sur Nantes 
+
+prop_resto<-tibble(
+  type_resto=c("Restaurant","Rapide","Traditionnelle"),
+  Nombre=c(sum(base$nb_resto),sum(base$nb_resto_rapides),sum(base$nb_resto_tradi)),
+  Proportion=c(sum(base$nb_resto)/sum(base$nb_resto),sum(base$nb_resto_rapides)/sum(base$nb_resto),sum(base$nb_resto_tradi)/sum(base$nb_resto))
+)
+
+print(prop_resto)
+```
+```{r}
+# les quartiers avec le plus d'Offres:
+base |> 
+  st_drop_geometry() |> 
+  select(NOM_IRIS,nb_resto_rapides) |> 
+  slice_max(nb_resto_rapides,n=5)
+```
+
+```{r}
+
+# 
+base |> 
+  st_drop_geometry() |> 
+  select(nb_resto_rapides) |>
+  ggplot()+
+  aes(x=nb_resto_rapides)+
+  geom_bar()+
+  labs(x="Nombre d'établissements dans l'IRIS",y="Nombre d'IRIS",title="Nombre de restaurants rapides par IRIS")+
+  theme_minimal()
+```
+
+```{r}
+base |> 
+  st_drop_geometry() |> 
+  select(nb_resto_rapides, nb_resto_tradi) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "type_resto",
+    values_to = "nb"
+  ) |>
+  mutate(
+    type_resto = recode(
+      type_resto,
+      nb_resto_rapides = "Restauration rapide (56.10C)",
+      nb_resto_tradi    = "Restauration traditionnelle (56.10A)"
+    ) )|> 
+      ggplot()+
+  aes(x = nb, fill = type_resto)+
+      geom_bar(show.legend = FALSE) +
+  facet_wrap(~ type_resto, ncol = 2) +
+  labs(
+    x = "Nombre d'établissements dans l'IRIS",
+    y = "Nombre d'IRIS",
+    title = "Nombre de restaurants rapides vs traditionnels par IRIS"
+  ) +
+  theme_minimal()
+```
+```{r}
+
+```
+
+
+### 3.1.2 Analyse bivariée
+
+
+
+```{r}
+# Relation bivarié entre valeurs:
+df_num <- base |>
+  st_drop_geometry() |>
+  select(nb_resto_rapides,nb_commerces_total,population,taux_pauv,med_uc,dist_centre_km,superficie_km2, -any_of("ID"))
+
+# 2. Matrice de corrélation
+mat_cor <- cor(df_num, use = "pairwise.complete.obs", method = "spearman")
+corrplot(
+  mat_cor,
+  method = "color",       
+  type = "upper",         
+  order = "hclust",
+  col = COL2("RdBu",100),
+  tl.col = "black",       
+  tl.srt = 45,            
+  number.cex = 0.65,      
+  diag = FALSE            
+)
+
+```
+### 3.1.3 Cartes:
+```{r}
+# densite de population:
+base |>
+  ggplot() +
+  geom_sf(aes(fill = cut(
+    population,
+    breaks = c(-Inf,500,1000,3000,5000, Inf),
+    labels = c("-500","500-1000", "1000-3000","3000-5000", "5000+")
+  )), color = "white", linewidth = 0.1) +
+  scale_fill_brewer(
+    palette = "OrRd",
+    name = "Population"
+  ) +
+  labs(
+  title = "Nombre d'habitants",
+  subtitle = "Nantes – Échelle IRIS, 2025",
+  fill = "Restaurants / km²",
+  caption = paste(
+    "Sources : INSEE",
+    "Calculs de l'auteur."
+  ))+
+  theme_void()
+```
+```{r}
+base |>
+  mutate(
+    revenu_quartile = cut(
+      med_uc,
+      breaks = quantile(
+        med_uc,
+        probs = seq(0, 1, 0.25),
+        na.rm = TRUE
+      ),
+      include.lowest = TRUE,
+      labels = c("Q1 - Faible", "Q2", "Q3", "Q4 - Élevé")
+    )
+  ) |> 
+  ggplot()+
+  geom_sf(aes(fill = revenu_quartile),
+          color = "white",
+          linewidth = 0.1) +
+  scale_fill_brewer(
+    palette = "YlOrRd",
+    direction = -1,
+    name = "Revenu médian"
+  ) +
+  labs(
+    title = "Distribution spatiale du revenu médian",
+    subtitle = "Répartition par quartiles à l'échelle des IRIS",
+    caption = "Source : INSEE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+
+```{r}
+# densite des restaurants rapide:
+
+base |>
+  ggplot() +
+  geom_sf(aes(fill = cut(
+    nb_resto_rapides,
+    breaks = c(-Inf, 0, 2, 5, 10, Inf),
+    labels = c("0", "1-2", "3-5", "6-10", "10+")
+  )), color = "white", linewidth = 0.1) +
+  scale_fill_brewer(
+    palette = "OrRd",
+    name = "Nombre Restaurants rapide"
+  ) +
+  labs(
+  title = "Nombre des restaurants rapides",
+  subtitle = "Nantes – Échelle IRIS, 2025",
+  fill = "Restaurants / km²",
+  caption = paste(
+    "Sources : INSEE (contours IRIS),",
+    "Calculs de l'auteur."
+  ))+
+  theme_void()
+   
+```
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = deniste_resto_rapide),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Restaurants / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration spatiale des restaurants rapides",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE, SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = densite_commerce),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Commerces (hors Restauration) / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration spatiale des restaurants rapides",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE, SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = densite_pop),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Habitants / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration spatiale des restaurants rapides",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE (2022), SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+
