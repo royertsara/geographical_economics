@@ -1,6 +1,6 @@
 ---
 title: "Analyse descriptive : desserte TAN et restauration rapide"
-subtitle: "Script 04, section 3.2 "
+subtitle: "Script 04, section 3.2 (partie Ahmat)"
 format: html
 editor: visual
 lang: fr
@@ -9,7 +9,7 @@ execute:
   message: false
 ---
 
-Cette section complète la partie 3.1 dans `04_base_analyse.qmd`. Elle peut être collée à la suite de sa partie (les chunks réutilisent alors son objet `base`) ou exécutée seule : dans ce cas, la fusion est refaite ci-dessous.
+Cette section complète la partie 3.1  dans `04_base_analyse.qmd`. Elle peut être collée à la suite de sa partie (les chunks réutilisent alors son objet `base`) ou exécutée seule : dans ce cas, la fusion est refaite ci-dessous.
 
 # Packages
 
@@ -61,7 +61,6 @@ jour_type   <- readRDS(here("jour_type.rds"))
 nrow(base)                     # 97
 sum(is.na(base$passages_jour)) # 0 : la jointure a fonctionné
 ```
-
 # Statistiques des variables de transport
 
 ```{r}

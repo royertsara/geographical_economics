@@ -56,7 +56,6 @@ nchar(contours_iris$CODE_IRIS) |> unique() # 9 caractères
 # Jour type
 
 Un mardi de 2026 hors octobre et novembre (mouvements sociaux). Si la date n'est pas couverte par le GTFS, on retient le mardi le plus chargé hors octobre et novembre.
-
 ```{r}
 date_souhaitee <- as.Date("2026-12-08") # Jour type fixé : mardi 8 décembre 2026
 
