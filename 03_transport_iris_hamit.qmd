@@ -1,0 +1,224 @@
+---
+title: "Transports par quartier"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(readr)
+library(sf)
+library(data.table)
+library(here)
+```
+
+# Data
+
+**GTFS Naolib** : fichiers du réseau de transport de Nantes Métropole, téléchargés automatiquement dans le dossier `gtfs/` s'ils sont absents. Ce dossier (546 Mo) n'est pas versionné sur GitHub.
+
+**contours_iris** : découpage géographique des quartiers de la commune Nantes (44109)
+
+```{r}
+url_gtfs <- "https://data.nantesmetropole.fr/explore/dataset/244400404_transports_commun_naolib_nantes_metropole_gtfs/files/0cc0469a72de54ee045cb66d1a21de9e/download/"
+
+fichiers_gtfs <- c("stops.txt", "routes.txt", "trips.txt", "stop_times.txt",
+                   "calendar.txt", "calendar_dates.txt", "shapes.txt")
+
+if (!all(file.exists(here("gtfs", fichiers_gtfs)))) {
+  options(timeout = 1200) # Fichier volumineux
+  dir.create(here("gtfs"), showWarnings = FALSE)
+  download.file(url_gtfs, here("gtfs.zip"), mode = "wb")
+  unzip(here("gtfs.zip"), files = fichiers_gtfs, exdir = here("gtfs"))
+  file.remove(here("gtfs.zip"))
+}
+```
+
+```{r}
+stops  <- read_csv(here("gtfs", "stops.txt"),  col_types = cols(stop_id = "c", parent_station = "c"))
+routes <- read_csv(here("gtfs", "routes.txt"), col_types = cols(route_id = "c"))
+trips  <- read_csv(here("gtfs", "trips.txt"),  col_types = cols(.default = "c"))
+cal    <- read_csv(here("gtfs", "calendar.txt"), col_types = cols(service_id = "c"))
+cal_d  <- read_csv(here("gtfs", "calendar_dates.txt"), col_types = cols(service_id = "c"))
+shapes <- read_csv(here("gtfs", "shapes.txt"), col_types = cols(shape_id = "c"))
+stop_times <- fread(here("gtfs", "stop_times.txt"), select = c("trip_id", "stop_id"),
+                    colClasses = "character")
+
+contours_iris <- st_read(here("iris_nantesv2.geojson")) |>
+  mutate(CODE_IRIS = as.character(CODE_IRIS)) |> # Clé de jointure en texte
+  st_transform(2154)                             # Lambert-93
+
+nrow(contours_iris)     # 97 IRIS
+nchar(contours_iris$CODE_IRIS) |> unique() # 9 caractères
+```
+
+# Jour type
+
+Un mardi de 2026 hors octobre et novembre (mouvements sociaux). Si la date n'est pas couverte par le GTFS, on retient le mardi le plus chargé hors octobre et novembre.
+
+```{r}
+date_souhaitee <- as.Date("2026-12-08") # Jour type fixé : mardi 8 décembre 2026
+
+services_actifs <- function(date) {
+  d    <- as.integer(format(date, "%Y%m%d"))
+  jour <- c("sunday", "monday", "tuesday", "wednesday",
+            "thursday", "friday", "saturday")[as.POSIXlt(date)$wday + 1]
+  base_cal <- cal |>
+    filter(start_date <= d, end_date >= d, .data[[jour]] == 1) |> pull(service_id)
+  ajouts   <- cal_d |> filter(date == d, exception_type == 1) |> pull(service_id)
+  retraits <- cal_d |> filter(date == d, exception_type == 2) |> pull(service_id)
+  union(setdiff(base_cal, retraits), ajouts)
+}
+
+debut <- as.Date(as.character(min(cal$start_date)), "%Y%m%d")
+fin   <- as.Date(as.character(max(cal$end_date)), "%Y%m%d")
+
+date_ref   <- date_souhaitee
+trips_jour <- trips |> filter(service_id %in% services_actifs(date_ref)) # Courses du jour type
+
+# Arrêt si le GTFS ne couvre pas le jour type : les résultats ne seraient plus comparables
+if (date_ref < debut || date_ref > fin || nrow(trips_jour) == 0) {
+  stop("Le GTFS utilisé ne couvre pas le ", format(date_ref, "%d/%m/%Y"),
+       " (période couverte : ", format(debut, "%d/%m/%Y"), " au ", format(fin, "%d/%m/%Y"), "). ",
+       "Utiliser la version archivée du GTFS indiquée dans le README.")
+}
+
+date_ref         # Jour type retenu
+nrow(trips_jour) # Nb de courses ce jour
+saveRDS(date_ref, here("jour_type.rds")) # Même jour pour toutes les variables de transport
+```
+
+# Lignes et passages par arrêt
+
+```{r}
+st <- stop_times |>
+  as_tibble() |>
+  inner_join(trips_jour |> select(trip_id, route_id), by = "trip_id") # Passages du jour type
+
+passages_arret <- st |> count(stop_id, name = "passages") # Nb de passages par quai
+
+lignes_arret <- st |>
+  distinct(stop_id, route_id) |>
+  left_join(routes |> select(route_id, route_type), by = "route_id") # 0 = tram, 3 = bus
+
+rm(stop_times, st); gc()
+```
+
+# Arrêts géolocalisés
+
+```{r}
+arrets <- stops |>
+  filter(is.na(location_type) | location_type == 0) |> # Points d'arrêt (quais)
+  inner_join(passages_arret, by = "stop_id") |>          # Quais desservis le jour type
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326) |>
+  st_transform(2154)
+
+nrow(arrets)
+```
+
+```{r}
+plot(st_geometry(contours_iris), main = "Vérification spatiale")
+plot(st_geometry(arrets), col = "blue", pch = 20, cex = 0.4, add = TRUE)
+```
+
+# Spatial join
+
+```{r}
+arrets_iris <- st_join(arrets, contours_iris |> select(CODE_IRIS), join = st_intersects) |>
+  st_drop_geometry() |>
+  filter(!is.na(CODE_IRIS)) # Arrêts situés dans Nantes
+```
+
+# Indicateurs
+
+```{r}
+nb_arrets_iris <- arrets_iris |>
+  group_by(CODE_IRIS) |>
+  summarise(nb_arrets     = n_distinct(stop_name), # Nb d'arrêts par quartier
+            passages_jour = sum(passages))         # Nb de passages sur le jour type
+
+nb_lignes_iris <- arrets_iris |>
+  select(CODE_IRIS, stop_id) |>
+  inner_join(lignes_arret, by = "stop_id", relationship = "many-to-many") |>
+  group_by(CODE_IRIS) |>
+  summarise(
+    nb_lignes      = n_distinct(route_id),                   # Nb de lignes différentes par quartier
+    nb_lignes_tram = n_distinct(route_id[route_type == 0]))  # Nb de lignes de tram par quartier
+
+transport_iris <- contours_iris |>
+  st_drop_geometry() |>
+  select(CODE_IRIS, NOM_IRIS) |>
+  left_join(nb_arrets_iris, by = "CODE_IRIS") |>
+  left_join(nb_lignes_iris, by = "CODE_IRIS") |>
+  mutate(across(c(nb_arrets, passages_jour, nb_lignes, nb_lignes_tram),
+                ~ replace_na(.x, 0))) # 0 si aucun arrêt
+
+summary(transport_iris)
+sum(transport_iris$passages_jour == 0) # IRIS sans aucun passage
+```
+
+# Proximité : distance au centre du quartier
+
+```{r}
+centres_iris <- st_point_on_surface(contours_iris) # Point au centre de chaque quartier
+
+arret_proche <- st_nearest_feature(centres_iris, arrets) # Arrêt le plus proche (Nantes et communes voisines)
+
+distance_iris <- tibble(
+  CODE_IRIS = centres_iris$CODE_IRIS,
+  dist_arret_m = as.numeric(st_distance(centres_iris, arrets[arret_proche, ], by_element = TRUE))) # Distance en mètres
+
+transport_iris <- transport_iris |>
+  left_join(distance_iris, by = "CODE_IRIS")
+
+summary(transport_iris$dist_arret_m)
+```
+
+# Passages dans un tampon de 400 m
+
+```{r}
+tampons <- contours_iris |>
+  select(CODE_IRIS) |>
+  st_buffer(400) |> # IRIS élargi de 400 m, environ 5 min de marche
+  mutate(surface_tampon_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+passages_tampon <- st_join(tampons, arrets |> select(passages), join = st_intersects) |>
+  st_drop_geometry() |>
+  group_by(CODE_IRIS, surface_tampon_km2) |>
+  summarise(passages = sum(passages, na.rm = TRUE), .groups = "drop") |>
+  mutate(passages_km2_400m = passages / surface_tampon_km2) |> # Passages par km² de tampon
+  select(CODE_IRIS, passages_km2_400m)
+
+transport_iris <- transport_iris |>
+  left_join(passages_tampon, by = "CODE_IRIS")
+
+summary(transport_iris$passages_km2_400m)
+```
+
+# Lignes de tram pour les cartes
+
+```{r}
+lignes_tram <- trips_jour |>
+  inner_join(routes |> filter(route_type == 0), by = "route_id") |>
+  distinct(shape_id, route_short_name) |>
+  inner_join(shapes, by = "shape_id") |>
+  arrange(shape_id, shape_pt_sequence) |>
+  st_as_sf(coords = c("shape_pt_lon", "shape_pt_lat"), crs = 4326) |>
+  group_by(shape_id, route_short_name) |>
+  summarise(do_union = FALSE, .groups = "drop") |>
+  st_cast("LINESTRING") |>
+  group_by(ligne = route_short_name) |>
+  summarise(.groups = "drop") |> # Un tracé par ligne
+  st_transform(2154)
+
+lignes_tram
+```
+
+# Sauvegarde
+
+```{r}
+saveRDS(transport_iris, here("transport_iris.rds"))
+saveRDS(lignes_tram, here("lignes_tram.rds"))
+saveRDS(arrets |> select(stop_id, stop_name, passages), here("arrets_naolib.rds"))
+```

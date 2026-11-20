@@ -1,0 +1,220 @@
+---
+title: "Analyse descriptive : desserte TAN et restauration rapide"
+subtitle: "Script 04, section 3.2 "
+format: html
+editor: visual
+lang: fr
+execute:
+  warning: false
+  message: false
+---
+
+Cette section complète la partie 3.1 dans `04_base_analyse.qmd`. Elle peut être collée à la suite de sa partie (les chunks réutilisent alors son objet `base`) ou exécutée seule : dans ce cas, la fusion est refaite ci-dessous.
+
+# Packages
+
+```{r}
+library(tidyverse)
+library(here)
+library(sf)
+library(knitr)
+```
+
+# Fusion et variables dérivées de transport
+
+Les trois variables dérivées du contrat sont calculées ici, à la fusion :
+
+-   `passages_km2` : passages du jour type par km² d'IRIS ;
+-   `dens_arrets` : arrêts par km² ;
+-   `tram` : 1 si l'IRIS est desservi par au moins une ligne de tram.
+
+```{r}
+contours_iris <- st_read(here("iris_nantesv2.geojson"), quiet = TRUE) |> 
+  st_transform(2154) |> 
+  mutate(CODE_IRIS = as.character(CODE_IRIS)) |> 
+  select(CODE_IRIS)
+
+restos <- readRDS(here("iris_restos_indicateurs.rds"))
+if (inherits(restos, "sf")) restos <- st_drop_geometry(restos) # On garde seulement les données
+
+# Code du quartier : colonne CODE_IRIS si elle existe, sinon les 9 derniers caractères de ID
+if ("CODE_IRIS" %in% names(restos)) {
+  restos <- restos |> mutate(CODE_IRIS = as.character(CODE_IRIS))
+} else {
+  restos <- restos |> mutate(CODE_IRIS = str_sub(ID, -9))
+}
+
+base <- restos |> 
+  left_join(readRDS(here("transport_iris.rds")) |> select(-NOM_IRIS), by = "CODE_IRIS")
+
+base <- base |> 
+  mutate(passages_km2 = passages_jour / superficie_km2,
+         dens_arrets  = nb_arrets / superficie_km2,
+         tram         = as.integer(nb_lignes_tram > 0),
+         densite_resto_rapide = nb_resto_rapides / superficie_km2)
+
+base_sf <- contours_iris |> left_join(base, by = "CODE_IRIS") # format sf pour les cartes
+
+lignes_tram <- readRDS(here("lignes_tram.rds"))
+jour_type   <- readRDS(here("jour_type.rds"))
+
+nrow(base)                     # 97
+sum(is.na(base$passages_jour)) # 0 : la jointure a fonctionné
+```
+
+# Statistiques des variables de transport
+
+```{r}
+stats <- function(x) c(Moyenne = mean(x, na.rm = TRUE), Médiane = median(x, na.rm = TRUE),
+                       `Écart-type` = sd(x, na.rm = TRUE), Minimum = min(x, na.rm = TRUE),
+                       Maximum = max(x, na.rm = TRUE))
+
+base |>
+  select(`Passages par jour` = passages_jour,
+         `Passages par km²` = passages_km2,
+         `Passages par km², tampon 400 m` = passages_km2_400m,
+         `Arrêts par km²` = dens_arrets,
+         `Distance à l'arrêt le plus proche (m)` = dist_arret_m) |>
+  map_dfr(stats, .id = "Variable") |>
+  kable(digits = 1, caption = paste("Desserte TAN par IRIS, jour type :",
+                                    format(jour_type, "%d/%m/%Y")))
+```
+
+```{r}
+tibble(
+  Indicateur = c("IRIS desservis par le tram", "IRIS sans aucun passage",
+                 "IRIS à moins de 300 m d'un arrêt"),
+  Valeur = c(sprintf("%d sur %d (%.0f %%)", sum(base$tram), nrow(base), 100 * mean(base$tram)),
+             sprintf("%d", sum(base$passages_jour == 0)),
+             sprintf("%.0f %%", 100 * mean(base$dist_arret_m <= 300)))
+) |>
+  kable()
+```
+
+# Distribution des passages
+
+La distribution des passages est très asymétrique : quelques IRIS concentrent l'essentiel de la desserte. L'histogramme en échelle logarithmique justifie l'usage du log dans les modèles.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+bind_rows(
+  tibble(echelle = "Échelle naturelle", valeur = base$passages_km2),
+  tibble(echelle = "Échelle logarithmique", valeur = log1p(base$passages_km2))
+) |>
+  mutate(echelle = fct_inorder(echelle)) |>
+  ggplot(aes(valeur)) +
+  geom_histogram(bins = 20, fill = "#2b6cb0", color = "white") +
+  facet_wrap(~ echelle, scales = "free_x") +
+  labs(x = "Passages par km² (log(1 + x) à droite)", y = "Nombre d'IRIS",
+       caption = "Source : GTFS Naolib, calculs de l'auteur") +
+  theme_minimal()
+```
+
+**Les dix IRIS les plus desservis**
+
+```{r}
+base |>
+  arrange(desc(passages_km2)) |>
+  slice_head(n = 10) |>
+  select(IRIS = NOM_IRIS, `Passages par jour` = passages_jour,
+         `Passages par km²` = passages_km2, `Lignes de tram` = nb_lignes_tram,
+         `Restaurants rapides` = nb_resto_rapides) |>
+  kable(digits = 0, format.args = list(big.mark = " "))
+```
+
+# Restauration rapide selon la desserte en tram
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4.5
+base |>
+  mutate(tram = factor(tram, levels = c(0, 1), labels = c("Sans tram", "Avec tram"))) |>
+  ggplot(aes(tram, densite_resto_rapide + 1)) +
+  geom_boxplot(fill = "#bee3f8", outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.5, size = 1.2) +
+  scale_y_log10() +
+  labs(x = NULL, y = "Restaurants rapides par km² (+1, échelle log)",
+       caption = "Sources : SIRENE, GTFS Naolib") +
+  theme_minimal()
+
+base |>
+  group_by(Tram = if_else(tram == 1, "Avec tram", "Sans tram")) |>
+  summarise(IRIS = n(),
+            `Densité moyenne` = mean(densite_resto_rapide),
+            `Densité médiane` = median(densite_resto_rapide)) |>
+  kable(digits = 1)
+```
+
+# Premier aperçu du lien
+
+```{r}
+#| fig-width: 6.5
+#| fig-height: 5
+ggplot(base, aes(passages_km2, densite_resto_rapide + 1)) +
+  geom_point(aes(color = factor(tram, labels = c("Sans tram", "Avec tram")))) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30") +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(values = c("#90cdf4", "#c53030"), name = NULL) +
+  labs(x = "Passages par km² (échelle log)",
+       y = "Restaurants rapides par km² (+1, échelle log)",
+       caption = "Sources : SIRENE, GTFS Naolib") +
+  theme_minimal()
+
+cor(log1p(base$passages_km2), log1p(base$densite_resto_rapide), use = "complete.obs")
+```
+
+# Cartes
+
+Conventions : classes par quantiles, palette bleue pour la famille transport, titre et source sous chaque carte.
+
+```{r}
+classes_quantiles <- function(x, n = 5) {
+  bornes <- unique(quantile(x, probs = seq(0, 1, length.out = n + 1), na.rm = TRUE))
+  cut(x, breaks = bornes, include.lowest = TRUE, dig.lab = 5)
+}
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_passages <- base_sf |>
+  mutate(classe = classes_quantiles(passages_km2)) |>
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  geom_sf(data = lignes_tram, color = "#c53030", linewidth = 0.8) +
+  scale_fill_brewer(palette = "Blues", name = "Passages par km²\n(quintiles)") +
+  labs(title = "Passages de bus et de tram par km² et lignes de tram",
+       caption = paste("Source : GTFS Naolib, jour type du", format(jour_type, "%d/%m/%Y"),
+                       "; lignes de tram en rouge")) +
+  theme_void()
+carte_passages
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_distance <- base_sf |>
+  mutate(classe = classes_quantiles(dist_arret_m)) |>
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  scale_fill_brewer(palette = "Blues", direction = -1,
+                    name = "Distance (m)\n(quintiles)") +
+  labs(title = "Distance entre le centre de l'IRIS et l'arrêt le plus proche",
+       caption = "Source : GTFS Naolib, IRIS IGN") +
+  theme_void()
+carte_distance
+```
+
+```{r}
+dir.create(here("cartes"), showWarnings = FALSE)
+ggsave(here("cartes/carte_passages_km2.png"), carte_passages, width = 7, height = 6.5, dpi = 300)
+ggsave(here("cartes/carte_distance_arret.png"), carte_distance, width = 7, height = 6.5, dpi = 300)
+```
+
+# Sauvegarde
+
+```{r}
+saveRDS(base, here("base_analyse.rds"))
+```
