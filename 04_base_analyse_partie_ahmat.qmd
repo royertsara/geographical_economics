@@ -1,6 +1,6 @@
 ---
 title: "Analyse descriptive : desserte TAN et restauration rapide"
-subtitle: "Script 04, section 3.2 (partie Ahmat)"
+subtitle: "Script 04, section 3.2 et 3.3"
 format: html
 editor: visual
 lang: fr
@@ -166,24 +166,27 @@ cor(log1p(base$passages_km2), log1p(base$densite_resto_rapide), use = "complete.
 
 # Cartes
 
-Conventions : classes par quantiles, palette bleue pour la famille transport, titre et source sous chaque carte.
+Conventions : classes par quartiles (Q1 à Q4, 25 % des IRIS chacune), palette bleue pour la famille transport, titre et source sous chaque carte.
 
 ```{r}
-classes_quantiles <- function(x, n = 5) {
+classes_quantiles <- function(x, n = 4) {
   bornes <- unique(quantile(x, probs = seq(0, 1, length.out = n + 1), na.rm = TRUE))
-  cut(x, breaks = bornes, include.lowest = TRUE, dig.lab = 5)
+  etiquettes <- paste0("Q", seq_len(length(bornes) - 1), " (",
+                       format(round(head(bornes, -1)), big.mark = " ", trim = TRUE), " à ",
+                       format(round(bornes[-1]), big.mark = " ", trim = TRUE), ")")
+  cut(x, breaks = bornes, include.lowest = TRUE, labels = etiquettes)
 }
 ```
 
 ```{r}
 #| fig-width: 7
 #| fig-height: 6.5
-carte_passages <- base_sf |>
-  mutate(classe = classes_quantiles(passages_km2)) |>
+carte_passages <- base_sf |> 
+  mutate(classe = classes_quantiles(passages_km2)) |> 
   ggplot() +
   geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
   geom_sf(data = lignes_tram, color = "#c53030", linewidth = 0.8) +
-  scale_fill_brewer(palette = "Blues", name = "Passages par km²\n(quintiles)") +
+  scale_fill_brewer(palette = "Blues", name = "Passages par km²\n(quartiles)") +
   labs(title = "Passages de bus et de tram par km² et lignes de tram",
        caption = paste("Source : GTFS Naolib, jour type du", format(jour_type, "%d/%m/%Y"),
                        "; lignes de tram en rouge")) +
@@ -194,12 +197,12 @@ carte_passages
 ```{r}
 #| fig-width: 7
 #| fig-height: 6.5
-carte_distance <- base_sf |>
-  mutate(classe = classes_quantiles(dist_arret_m)) |>
+carte_distance <- base_sf |> 
+  mutate(classe = classes_quantiles(dist_arret_m)) |> 
   ggplot() +
   geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
   scale_fill_brewer(palette = "Blues", direction = -1,
-                    name = "Distance (m)\n(quintiles)") +
+                    name = "Distance (m)\n(quartiles)") +
   labs(title = "Distance entre le centre de l'IRIS et l'arrêt le plus proche",
        caption = "Source : GTFS Naolib, IRIS IGN") +
   theme_void()
@@ -212,6 +215,143 @@ ggsave(here("cartes/carte_passages_km2.png"), carte_passages, width = 7, height 
 ggsave(here("cartes/carte_distance_arret.png"), carte_distance, width = 7, height = 6.5, dpi = 300)
 ```
 
+
+
+
+
+# 3.3 Avant les modèles
+
+```{r}
+library(spdep) # autocorrélation spatiale
+```
+
+## Matrice de corrélation des variables explicatives
+
+On calcule les corrélations entre les variables qui entreront dans les modèles, sous la même forme (logarithme ou niveau). Une corrélation supérieure à 0,7 en valeur absolue signale un risque de colinéarité.
+
+```{r}
+explicatives <- base |> 
+  mutate(med_uc = as.numeric(med_uc)) |> 
+  transmute(`log(passages/km²)`          = log(passages_km2),
+            `Tram`                       = tram,
+            `Distance à l'arrêt (m)`     = dist_arret_m,
+            `log(densité de population)` = log(densite_pop),
+            `log(revenu médian)`         = log(med_uc),
+            `Densité commerciale`        = densite_commerce,
+            `Distance au centre (km)`    = if ("dist_centre_km" %in% names(base)) dist_centre_km else NA_real_) |> 
+  select(where(~ !all(is.na(.x)))) # retire une variable absente de la base
+
+matrice_cor <- cor(explicatives, use = "pairwise.complete.obs")
+
+kable(matrice_cor, digits = 2, caption = "Corrélations entre les variables explicatives")
+```
+
+```{r}
+#| fig-width: 7.5
+#| fig-height: 6
+matrice_cor |> 
+  as.data.frame() |> 
+  rownames_to_column("var1") |> 
+  pivot_longer(-var1, names_to = "var2", values_to = "r") |> 
+  mutate(var1 = factor(var1, levels = colnames(matrice_cor)),
+         var2 = factor(var2, levels = rev(colnames(matrice_cor)))) |> 
+  ggplot(aes(var1, var2, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 3.2) +
+  scale_fill_gradient2(low = "#2b6cb0", mid = "white", high = "#c53030",
+                       limits = c(-1, 1), name = "Corrélation") +
+  labs(x = NULL, y = NULL,
+       title = "Corrélations entre les variables explicatives",
+       caption = "Sources : GTFS Naolib, INSEE, SIRENE ; calcul de l'auteur") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+Paires les plus corrélées, à surveiller dans les modèles :
+
+```{r}
+matrice_cor |> 
+  as.data.frame() |> 
+  rownames_to_column("Variable 1") |> 
+  pivot_longer(-`Variable 1`, names_to = "Variable 2", values_to = "Corrélation") |> 
+  filter(`Variable 1` < `Variable 2`) |> 
+  arrange(desc(abs(Corrélation))) |> 
+  slice_head(n = 5) |> 
+  kable(digits = 2)
+```
+
+## Autocorrélation spatiale de la densité de restaurants rapides
+
+L'indice de Moran global mesure si les quartiers voisins ont des densités de restaurants rapides semblables. Une valeur positive et significative indique une concentration spatiale : les quartiers denses en restauration rapide se regroupent. Deux IRIS sont voisins s'ils partagent une frontière (contiguïté de type « reine »).
+
+```{r}
+base_moran <- base_sf |> filter(!is.na(densite_resto_rapide))
+
+voisins <- poly2nb(base_moran, queen = TRUE)
+poids   <- nb2listw(voisins, style = "W", zero.policy = TRUE)
+
+y_moran <- log1p(base_moran$densite_resto_rapide) # log(1 + x) : certains IRIS n'ont aucun restaurant
+
+moran_test <- moran.test(y_moran, poids, zero.policy = TRUE)
+moran_test
+
+# Version par permutations (999 tirages), plus robuste avec 97 observations
+moran_perm <- moran.mc(y_moran, poids, nsim = 999, zero.policy = TRUE)
+moran_perm
+```
+
+```{r}
+tibble(
+  Indicateur = c("Indice de Moran", "Valeur attendue sans autocorrélation",
+                 "p-value (test analytique)", "p-value (999 permutations)"),
+  Valeur = c(moran_test$estimate[["Moran I statistic"]],
+             moran_test$estimate[["Expectation"]],
+             moran_test$p.value,
+             moran_perm$p.value)
+) |> 
+  kable(digits = 3, caption = "Autocorrélation spatiale de la densité de restaurants rapides (log)")
+```
+
+```{r}
+#| fig-width: 6.5
+#| fig-height: 5.5
+# Diagramme de Moran : densité de l'IRIS (x) et moyenne de ses voisins (y)
+tibble(y = y_moran,
+       y_voisins = lag.listw(poids, y_moran, zero.policy = TRUE)) |> 
+  ggplot(aes(y, y_voisins)) +
+  geom_point(color = "#c05621", alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "grey30") +
+  geom_vline(xintercept = mean(y_moran), linetype = "dashed", color = "grey60") +
+  geom_hline(yintercept = mean(y_moran), linetype = "dashed", color = "grey60") +
+  labs(x = "log(1 + restaurants rapides par km²) de l'IRIS",
+       y = "Moyenne des IRIS voisins",
+       title = "Diagramme de Moran",
+       caption = "Source : SIRENE ; voisinage par contiguïté") +
+  theme_minimal()
+```
+
+## Cartes : lignes de tram et restauration rapide
+
+Conventions : classes par quartiles (Q1 à Q4, 25 % des IRIS chacune), palette orange pour la famille « restauration », bleue pour la famille « transport », titre et source sous chaque carte.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_densite <- base_sf |> 
+  mutate(classe = classes_quantiles(densite_resto_rapide)) |> 
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  geom_sf(data = lignes_tram, color = "#c53030", linewidth = 0.8) +
+  scale_fill_brewer(palette = "Oranges", name = "Restaurants rapides\npar km² (quartiles)") +
+  labs(title = "Densité de restaurants rapides et lignes de tramway",
+       caption = "Sources : SIRENE (NAF 56.10C), GTFS Naolib, IRIS IGN ; lignes de tram en rouge") +
+  theme_void()
+carte_densite
+```
+
+```{r}
+ggsave(here("cartes/carte_densite_fastfood_tram.png"), carte_densite, width = 7, height = 6.5, dpi = 300)
+```
 # Sauvegarde
 
 ```{r}
