@@ -20,7 +20,7 @@ library(sf)
 ```{r}
 
 entreprises<-st_read("entreprises_nantes.geojson")
-contours_iris<-st_read("iris_nantesv2.geojson")
+contours_iris<-readRDS("iris_nantesv2.rds")
 ```
 
 ```{r}
@@ -32,9 +32,21 @@ plot(st_geometry(entreprises), col = "red", pch = 20, add = TRUE)
 
 ```{r}
 
-# Calcul superficie
+# L'objectif de cette section est de récupéré les indicateurs pertinents au niveau des restaurants et de l'iris : superficie, distance au centre superficie, nombre de restaurants, activité commerciale, socio démographique 
+
+# Distance au centre historique (Graslin-Commerce)
+centre_nantes<-contours_iris |> 
+  filter(NOM_IRIS=="Graslin-Commerce") |> 
+  slice(1) |> 
+  st_point_on_surface() |> 
+  st_geometry()
+  
+
+# Calcul superficie et distance au centre
 contours_iris_clean<-contours_iris |> 
-  mutate(superficie_km2=as.numeric(st_area(geometry)) / 1e6)
+  mutate(
+    superficie_km2=as.numeric(st_area(geometry)) / 1e6,
+    dist_centre_km = as.numeric(st_distance(st_point_on_surface(geometry), centre_nantes)) / 1000)
 
 #Jointure spatial
 iris_ff_join<-st_join(contours_iris_clean,entreprises,join=st_intersects)
@@ -65,7 +77,11 @@ iris_stats_indicateurs<-iris_ff_join |>
     med_uc=first(med_uc),
     taux_pauv=first(taux_pauv),
     superficie_km2=first(superficie_km2),
-  .groups="drop")
+  .groups="drop",
+    # Distance au centre et géograpqhie
+  superficie_km2=first(superficie_km2),
+  dist_centre_km=first(dist_centre_km)
+  )
 
 
 # Jointure porpre avec la géométrie d'origine
@@ -84,7 +100,8 @@ iris_ff_indicateurs<-contours_iris_clean|>
   
 ```
 
+
+
 ```{r}
 saveRDS(iris_ff_indicateurs, "iris_restos_indicateurs.rds")
 ```
-

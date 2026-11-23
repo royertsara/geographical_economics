@@ -11,6 +11,7 @@ library(tidyverse)
 library(fixest)
 library(sf)
 library(corrplot)
+library(ggrepel)
 ```
 
 # Data
@@ -29,18 +30,20 @@ transport_iris      <- readRDS("transport_iris.rds")
 ```{r}
 base <- iris_ff_indicateurs |> 
   mutate(CODE_IRIS = str_sub(ID, -9)) |> # Code du quartier = 9 derniers caractères de ID
-  left_join(transport_iris |> select(-NOM_IRIS), by = "CODE_IRIS")
+  left_join(transport_iris |> dplyr::select(-NOM_IRIS), by = "CODE_IRIS")
 
 
-base <- base |> select(-CODE_IRIS)
+base <- base |> dplyr::select(-CODE_IRIS)
 nrow(base) # 97 quartiers
 ncol(base) # 21 indicateurs 
 ```
-# Analyse descriptive: 
 
-## 3.1 
+# Analyse descriptive:
 
-### 3.1.1 Statistiques descriptives 
+## 3.1
+
+### 3.1.1 Statistiques descriptives
+
 ```{r}
 
 options(scipen = 999)
@@ -75,11 +78,12 @@ prop_resto<-tibble(
 
 print(prop_resto)
 ```
+
 ```{r}
 # les quartiers avec le plus d'Offres:
 base |> 
   st_drop_geometry() |> 
-  select(NOM_IRIS,nb_resto_rapides) |> 
+  dplyr::select(NOM_IRIS,nb_resto_rapides) |> 
   slice_max(nb_resto_rapides,n=5)
 ```
 
@@ -88,12 +92,16 @@ base |>
 # 
 base |> 
   st_drop_geometry() |> 
-  select(nb_resto_rapides) |>
+  dplyr::select(nb_resto_rapides) |>
   ggplot()+
   aes(x=nb_resto_rapides)+
   geom_bar()+
-  labs(x="Nombre d'établissements dans l'IRIS",y="Nombre d'IRIS",title="Nombre de restaurants rapides par IRIS")+
+  labs(x="Nombre d'établissements dans l'IRIS",
+       y="Nombre d'IRIS",
+       title="Nombre de restaurants rapides par IRIS",
+       capiton= "Source : Calculs auteurs" )+
   theme_minimal()
+
 ```
 
 ```{r}
@@ -122,14 +130,12 @@ base |>
   ) +
   theme_minimal()
 ```
+
 ```{r}
 
 ```
 
-
 ### 3.1.2 Analyse bivariée
-
-
 
 ```{r}
 # Relation bivarié entre valeurs:
@@ -152,7 +158,9 @@ corrplot(
 )
 
 ```
+
 ### 3.1.3 Cartes:
+
 ```{r}
 # densite de population:
 base |>
@@ -160,11 +168,12 @@ base |>
   geom_sf(aes(fill = cut(
     population,
     breaks = c(-Inf,500,1000,3000,5000, Inf),
-    labels = c("-500","500-1000", "1000-3000","3000-5000", "5000+")
+    labels = c("<500","500-1000", "1000-3000","3000-5000", "5000+")
   )), color = "white", linewidth = 0.1) +
   scale_fill_brewer(
     palette = "OrRd",
-    name = "Population"
+    name = "Population",
+    drop=FALSE
   ) +
   labs(
   title = "Nombre d'habitants",
@@ -176,6 +185,7 @@ base |>
   ))+
   theme_void()
 ```
+
 ```{r}
 base |>
   mutate(
@@ -207,9 +217,9 @@ base |>
   theme_void()
 ```
 
-
 ```{r}
 # densite des restaurants rapide:
+iris_zero <- base |> filter(nb_resto_rapides == 0)
 
 base |>
   ggplot() +
@@ -218,9 +228,17 @@ base |>
     breaks = c(-Inf, 0, 2, 5, 10, Inf),
     labels = c("0", "1-2", "3-5", "6-10", "10+")
   )), color = "white", linewidth = 0.1) +
+  geom_text_repel(
+    data = iris_zero,
+    aes(label = NOM_IRIS, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 2.2,
+    min.segment.length = 0,
+    max.overlaps = Inf
+  ) +
   scale_fill_brewer(
     palette = "OrRd",
-    name = "Nombre Restaurants rapide"
+    name = "Nombre Restaurants rapides"
   ) +
   labs(
   title = "Nombre des restaurants rapides",
@@ -233,6 +251,7 @@ base |>
   theme_void()
    
 ```
+
 ```{r}
 base |>
   ggplot() +
@@ -268,12 +287,13 @@ base |>
     na.value = "grey85"
   ) +
   labs(
-    title = "Concentration spatiale des restaurants rapides",
+    title = "Concentration des commerces",
     subtitle = "Densité par IRIS à Nantes",
     caption = "Sources : INSEE, SIRENE. Calculs de l'auteur."
   ) +
   theme_void()
 ```
+
 ```{r}
 base |>
   ggplot() +
@@ -288,11 +308,9 @@ base |>
     na.value = "grey85"
   ) +
   labs(
-    title = "Concentration spatiale des restaurants rapides",
+    title = "Concentration spatiale de la population",
     subtitle = "Densité par IRIS à Nantes",
     caption = "Sources : INSEE (2022), SIRENE. Calculs de l'auteur."
   ) +
   theme_void()
 ```
-
-
