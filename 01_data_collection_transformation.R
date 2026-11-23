@@ -25,7 +25,7 @@ entreprise_data <- data |>
     convert = TRUE
   ) |>
   mutate(code_naf = `Activité principale de l'établissement...47`) |>
-  select(
+  dplyr::select(
     SIREN,
     SIRET,
     `Dénomination usuelle de l'établissement`,

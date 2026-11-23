@@ -36,7 +36,6 @@ library(pscl)
 library(spdep)       # autocorrélation spatiale
 ```
 
-
 #1. Data collection and transformation
 
 ## Contours IRIS Nantes
@@ -56,47 +55,51 @@ iris_nantes <- st_read("iris_nantes.geojson")
 ## Entreprises de Nantes
 
 ```{r}
-# On récupère les données via l'api de Nantes métropole
+#-------------Données entreprises de nantes 44109 (récupérées  en local le 12 octobre 2026 et téléchargées en geojson uniquement sur notre périmètre pour allèger)
 
-url<-"https://data.nantesmetropole.fr/api/explore/v2.1/catalog/datasets/244400404_base-sirene-entreprises-nantes-metropole/exports/csv"
-
-entreprise_data<-read_delim(url,delim=";")
+# data <- read_csv2("244400404_base-sirene-entreprises-nantes-metropole.csv")
+# 
+# 
+# entreprise_data <- data |>
+#   filter(
+#     `Code commune de l'établissement` == 44109,
+#     `Etat administratif de l'établissement` == "Actif"
+#   ) |>
+#   separate(
+#     col = `Géolocalisation de l'établissement`,
+#     into = c("lat", "lon"),
+#     sep = ",",
+#     convert = TRUE
+#   ) |>
+#   mutate(code_naf = `Activité principale de l'établissement...47`) |>
+#   dplyr::select(
+#     SIREN,
+#     SIRET,
+#     `Dénomination usuelle de l'établissement`,
+#     `Date du début de la période de l'établissement`,
+#     `Tranche de l'effectif de l'unité légale`,
+#     code_naf,
+#     lon,
+#     lat
+#   )
+# 
+# # Transformation en données géographiques:
+# entreprise_data_sf <- entreprise_data |>
+#   filter(!is.na(lat) & !is.na(lon)) |>
+#   st_as_sf(coords = c("lon", "lat"), crs = 4326) |>
+#   st_transform(2154)
+# 
+# st_write(entreprise_data_sf,
+#   "entreprises_nantes.geojson",
+#   delete_layer = TRUE
+# )
 
 ```
 
-```{r}
-# On filtre sur les colonnes qui nous intéressent
-entreprise_data <- entreprise_data |>
-  filter(
-    codecommuneetablissement == 44109,
-    etatadministratifetablissement == "Actif"
-  ) |>
-  separate(
-    col = geolocetablissement,
-    into = c("lat", "lon"),
-    sep = ",",
-    convert = TRUE
-  ) |>
-  mutate(code_naf = activiteprincipaleetablissement) |>
-  dplyr::select(
-    siren,
-    siret,
-    denominationusuelleetablissement,
-    datedebutetablissement,
-    trancheeffectifsetablissement,
-    code_naf,
-    lon,
-    lat
-  )
 
-```
 
 ```{r}
-# Transformation en données géographiques:
-entreprise_data_sf <- entreprise_data |>
-  filter(!is.na(lat) & !is.na(lon)) |>
-  st_as_sf(coords = c("lon", "lat"), crs = 4326) |>
-  st_transform(2154)
+entreprise_data_sf<-st_read("entreprises_nantes.geojson")
 ```
 
 ## Variables sociodemographiques
@@ -175,13 +178,13 @@ iris_stats_indicateurs<-iris_ff_join |>
   summarise(
     
     # Indicateurs cibles (restaurants: rapides+tradi)
-    nb_resto=n_distinct(siret[code_naf %in% c("56.10C","56.10A")],na.rm=TRUE),
-    nb_resto_rapides=n_distinct(siret[code_naf=="56.10C"],na.rm=TRUE),
-    nb_resto_tradi=n_distinct(siret[code_naf=="56.10A"],na.rm=TRUE),
+    nb_resto=n_distinct(SIRET[code_naf %in% c("56.10C","56.10A")],na.rm=TRUE),
+    nb_resto_rapides=n_distinct(SIRET[code_naf=="56.10C"],na.rm=TRUE),
+    nb_resto_tradi=n_distinct(SIRET[code_naf=="56.10A"],na.rm=TRUE),
     
     # Indicateur global d'attractivité commerciale (Commerces + Bars + Coiffure/Beauté)
     nb_commerces_total = n_distinct(
-      siret[
+      SIRET[
         str_starts(code_naf, "47") |                  # Tout le commerce de détail
         code_naf == "56.30Z"      |                  # Les bars / débits de boissons
         str_starts(code_naf, "96.02")                # Salons de coiffure et soins de beauté
@@ -217,7 +220,6 @@ iris_ff_indicateurs<-contours_iris_clean|>
 ```
 
 ## Construction des variables de transport (variables d'intérêts)
-
 
 ## Data
 
@@ -419,10 +421,7 @@ lignes_tram <- trips_jour |>
 lignes_tram
 ```
 
-
-
 #2. Analyse descriptive
-
 
 ## Jointure
 
@@ -434,7 +433,7 @@ base <- iris_ff_indicateurs |>
 
 base <- base |> dplyr::select(-CODE_IRIS)
 nrow(base) # 97 quartiers
-ncol(base) # 21 indicateurs 
+ncol(base) # indicateurs 
 ```
 
 ## Analyse descriptive:
@@ -487,8 +486,7 @@ base |>
 ```
 
 ```{r}
-
-# 
+# Distribution du nombre de restaurants
 base |> 
   st_drop_geometry() |> 
   dplyr::select(nb_resto_rapides) |>
@@ -530,35 +528,11 @@ base |>
   theme_minimal()
 ```
 
-```{r}
 
-```
 
-#### 2.1.2 Analyse bivariée
 
-```{r}
-# Relation bivarié entre valeurs:
-df_num <- base |>
-  st_drop_geometry() |>
-  dplyr::select(nb_resto_rapides,nb_commerces_total,population,taux_pauv,med_uc,dist_centre_km,superficie_km2, -any_of("ID"))
 
-# 2. Matrice de corrélation
-mat_cor <- cor(df_num, use = "pairwise.complete.obs", method = "spearman")
-corrplot(
-  mat_cor,
-  method = "color",       
-  type = "upper",         
-  order = "hclust",
-  col = COL2("RdBu",100),
-  tl.col = "black",       
-  tl.srt = 45,            
-  number.cex = 0.65,      
-  diag = FALSE            
-)
-
-```
-
-#### 2.1.3 Cartes:
+#### 2.1.2 Cartes:
 
 ```{r}
 # densite de population:
@@ -714,13 +688,11 @@ base |>
   theme_void()
 ```
 
-
 ## 2.2 Analyse de la desserte TAN et de son lien avec la restauration rapide
 
 
-# 
 
-Les trois variables dérivées du contrat sont calculées ici, à la fusion :
+Les trois variables dérivées sont calculées ici, à la fusion :
 
 -   `passages_km2` : passages du jour type par km² d'IRIS ;
 -   `dens_arrets` : arrêts par km² ;
@@ -907,14 +879,9 @@ carte_distance <- base_sf |>
 carte_distance
 ```
 
-```{r}
-dir.create(here("cartes"), showWarnings = FALSE)
-ggsave(here("cartes/carte_passages_km2.png"), carte_passages, width = 7, height = 6.5, dpi = 300)
-ggsave(here("cartes/carte_distance_arret.png"), carte_distance, width = 7, height = 6.5, dpi = 300)
-```
+
 
 ## 2.3 Avant les modèles
-
 
 ### Matrice de corrélation des variables explicatives
 
@@ -928,7 +895,7 @@ explicatives <- base |>
             `Distance à l'arrêt (m)`     = dist_arret_m,
             `log(densité de population)` = log(densite_pop),
             `log(revenu médian)`         = log(med_uc),
-            `Densité commerciale`        = densite_commerce,
+            `log(Densité commerciale)`        = log(densite_commerce),
             `Distance au centre (km)`    = if ("dist_centre_km" %in% names(base)) dist_centre_km else NA_real_) |> 
   dplyr::select(where(~ !all(is.na(.x)))) # retire une variable absente de la base
 
@@ -1040,24 +1007,18 @@ carte_densite <- base_sf |>
 carte_densite
 ```
 
-```{r}
-ggsave(here("cartes/carte_densite_fastfood_tram.png"), carte_densite, width = 7, height = 6.5, dpi = 300)
-```
-
 
 
 #3. Estimations économétriques
-
 
 ```{r}
 restos <- iris_ff_indicateurs
 ```
 
-```{r}
-str(restos)
-```
 
 ```{r}
+
+# Base d'analyse pour les estimations
 base<-restos |> 
   st_drop_geometry() |> 
   mutate(CODE_IRIS = str_sub(ID, -9)) |> 
@@ -1100,6 +1061,7 @@ odTest(modele_nb)
 ```
 
 ```{r}
+# Test inflation de zero
 sum(base$nb_resto_rapides == 0)
 check_zeroinflation(modele_nb)
 ```
@@ -1117,6 +1079,7 @@ anova(m0, modele_nb)
 ```
 
 ```{r}
+# Qualité d'ajustement des modèles
 AIC(modele_baseline,modele_nb)
 ```
 
@@ -1160,4 +1123,3 @@ summary(modele_tram)
 ```{r}
 exp(cbind(IRR = coef(modele_400m), confint(modele_400m)))
 ```
-
