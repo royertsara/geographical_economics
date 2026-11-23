@@ -1,0 +1,135 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+```{r}
+library(fixest)
+library(MASS)
+library(stats)
+library(tidyverse)
+library(performance)
+library(pscl)
+```
+
+```{r}
+restos <- readRDS("iris_restos_indicateurs.rds")
+transport_iris<- readRDS("transport_iris.rds")
+```
+
+```{r}
+str(restos)
+```
+
+```{r}
+base<-restos |> 
+  st_drop_geometry() |> 
+  mutate(CODE_IRIS = str_sub(ID, -9)) |> 
+  dplyr::select(-NOM_IRIS,-ID) |> 
+  left_join(transport_iris,by="CODE_IRIS") |> 
+  mutate(passages_km2 = passages_jour / superficie_km2,
+          tram= as.integer(nb_lignes_tram > 0)
+         )
+
+```
+
+
+# Modèle baseline
+
+```{r}
+# 1. Modèle complet en Poisson
+
+modele_baseline <- glm(nb_resto_rapides ~ log(passages_km2) + tram + log(densite_pop) + log(med_uc) +
+                log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)),
+              family = poisson, data = base)
+summary(modele_baseline)
+
+
+
+```
+
+```{r}
+# 2. Surdispersion
+check_overdispersion(modele_baseline)
+```
+
+
+```{r}
+
+# 3. Binomiale négative si surdispersion
+modele_nb <- glm.nb(nb_resto_rapides ~ log(passages_km2) + tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+
+
+
+odTest(modele_nb)
+```
+
+```{r}
+sum(base$nb_resto_rapides == 0)
+check_zeroinflation(modele_nb)
+```
+
+```{r}
+# 4.Muclicolinéarité
+car::vif(modele_nb)
+```
+
+```{r}
+#5. Rapport de vraisemblance
+m0 <- glm.nb(nb_resto_rapides ~ 1 + offset(log(superficie_km2)), data = base_sans_na)
+anova(m0, modele_nb)
+```
+```{r}
+AIC(modele_baseline,modele_nb)
+```
+
+
+```{r}
+
+#6.Apport de chaque variable
+drop1(modele_nb, test = "Chisq")
+```
+
+
+```{r}
+# 7.Interprétation du modèle
+options(scipen=999)
+exp(cbind(IRR = coef(modele_nb), confint(modele_nb)))
+```
+
+
+
+
+```{r}
+summary(modele_nb)
+```
+
+## Robustesse:
+```{r}
+# modèle brut sans les valeurs manquantes
+base_sans_na<-base |> na.omit()
+modele_nb_brut <- glm.nb(nb_resto_rapides ~ log(passages_km2)+ offset(log(superficie_km2)), data = base_sans_na)
+summary(modele_nb_brut)
+```
+```{r}
+modele_400m<-glm.nb(nb_resto_rapides ~ log(passages_km2_400m) + tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+summary(modele_400m)
+```
+
+```{r}
+modele_tram<-glm.nb(nb_resto_rapides ~ tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+summary(modele_tram)
+```
+
+
+
+```{r}
+exp(cbind(IRR = coef(modele_400m), confint(modele_400m)))
+```
+
+
+
