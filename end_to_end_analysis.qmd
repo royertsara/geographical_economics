@@ -1,0 +1,1163 @@
+---
+title: "Script rendu final"
+format: html
+editor: visual
+---
+
+Ce fichier fusionne les scripts du projet dans l'ordre d'exécution.
+
+Conflit `MASS` / `dplyr` : les deux packages ont une fonction `select()`. Pour éviter toute erreur, tous les appels du fichier sont écrits `dplyr::select()`, quel que soit l'ordre de chargement des packages.
+
+```{r}
+wd <- getwd() # your working directory
+setwd(wd)
+```
+
+# Packages
+
+```{r}
+#| message: false
+
+library(MASS)        # binomiale négative (chargé avant tidyverse pour que dplyr::select reste prioritaire)
+library(stats)
+library(tidyverse)
+library(readr)
+library(sf)
+library(data.table)
+library(here)
+library(knitr)
+library(styler)
+library(httr2)
+library(fixest)
+library(corrplot)
+library(ggrepel)
+library(performance)
+library(pscl)
+library(spdep)       # autocorrélation spatiale
+```
+
+
+#1. Data collection and transformation
+
+## Contours IRIS Nantes
+
+```{r}
+# Filtrer au préalable sur la ville de Nantes uniquement 
+# Extraction des quartiers de Nantes
+# iris_nantes<-st_read("CONTOURS-IRIS.shp") |>
+# filter(INSEE_COM==44109)
+
+# Sauvegarde de notre fichier filtré
+# st_write(iris_nantes, "iris_nantes.geojson", delete_layer = TRUE)
+
+iris_nantes <- st_read("iris_nantes.geojson")
+```
+
+## Entreprises de Nantes
+
+```{r}
+# On récupère les données via l'api de Nantes métropole
+
+url<-"https://data.nantesmetropole.fr/api/explore/v2.1/catalog/datasets/244400404_base-sirene-entreprises-nantes-metropole/exports/csv"
+
+entreprise_data<-read_delim(url,delim=";")
+
+```
+
+```{r}
+# On filtre sur les colonnes qui nous intéressent
+entreprise_data <- entreprise_data |>
+  filter(
+    codecommuneetablissement == 44109,
+    etatadministratifetablissement == "Actif"
+  ) |>
+  separate(
+    col = geolocetablissement,
+    into = c("lat", "lon"),
+    sep = ",",
+    convert = TRUE
+  ) |>
+  mutate(code_naf = activiteprincipaleetablissement) |>
+  dplyr::select(
+    siren,
+    siret,
+    denominationusuelleetablissement,
+    datedebutetablissement,
+    trancheeffectifsetablissement,
+    code_naf,
+    lon,
+    lat
+  )
+
+```
+
+```{r}
+# Transformation en données géographiques:
+entreprise_data_sf <- entreprise_data |>
+  filter(!is.na(lat) & !is.na(lon)) |>
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) |>
+  st_transform(2154)
+```
+
+## Variables sociodemographiques
+
+```{r}
+#--Population:
+pop <- read_delim("base-ic-evol-struct-pop-2022.CSV",
+                  delim=";",
+                  locale=locale(decimal_mark=".")
+                  )
+
+pop_iris <- pop |>
+  filter(COM == "44109") |>
+  dplyr::select(IRIS, P22_POP) |>
+  rename(population = P22_POP, CODE_IRIS = IRIS)
+
+#--Proxy du niveau de vie:
+ve <- read_delim("BASE_TD_FILO_IRIS_2021_DISP.csv",
+                 delim=";",
+                 locale=locale(decimal_mark=",")
+                 )
+
+niv_vie <- ve |>
+  mutate(COM = str_sub(IRIS, start = 1, end = 5)) |>
+  filter(COM == "44109") |>
+  dplyr::select(IRIS, DISP_TP6021, DISP_MED21) |>
+  rename(
+    CODE_IRIS = IRIS,
+    taux_pauv = DISP_TP6021,
+    med_uc = DISP_MED21
+  ) |>
+  mutate(
+    med_uc = na_if(med_uc, "ns"),
+    taux_pauv = na_if(taux_pauv, "ns")
+  ) |> 
+  mutate(med_uc=as.numeric(str_replace(med_uc,",",".")),
+         taux_pauv=as.numeric(str_replace(taux_pauv,",","."))
+         )
+```
+
+## Jointure des informations par IRIS:
+
+```{r}
+iris_nantesv2 <- iris_nantes |>
+  left_join(pop_iris, by = "CODE_IRIS") |>
+  left_join(niv_vie, by = "CODE_IRIS")
+```
+
+## Construction des variables
+
+```{r}
+
+# L'objectif de cette section est de récupéré les indicateurs pertinents au niveau des restaurants et de l'iris : superficie, distance au centre superficie, nombre de restaurants, activité commerciale, socio démographique 
+
+# Distance au centre historique (Graslin-Commerce)
+centre_nantes<-iris_nantesv2 |> 
+  filter(NOM_IRIS=="Graslin-Commerce") |> 
+  slice(1) |> 
+  st_point_on_surface() |> 
+  st_geometry()
+  
+
+# Calcul superficie et distance au centre
+contours_iris_clean<-iris_nantesv2 |> 
+  mutate(
+    superficie_km2=as.numeric(st_area(geometry)) / 1e6,
+    dist_centre_km = as.numeric(st_distance(st_point_on_surface(geometry), centre_nantes)) / 1000)
+
+#Jointure spatiale
+iris_ff_join<-st_join(contours_iris_clean,entreprise_data_sf,join=st_intersects)
+
+# Indicateurs 
+iris_stats_indicateurs<-iris_ff_join |> 
+  st_drop_geometry()|> 
+  group_by(ID,NOM_IRIS) |> 
+  summarise(
+    
+    # Indicateurs cibles (restaurants: rapides+tradi)
+    nb_resto=n_distinct(siret[code_naf %in% c("56.10C","56.10A")],na.rm=TRUE),
+    nb_resto_rapides=n_distinct(siret[code_naf=="56.10C"],na.rm=TRUE),
+    nb_resto_tradi=n_distinct(siret[code_naf=="56.10A"],na.rm=TRUE),
+    
+    # Indicateur global d'attractivité commerciale (Commerces + Bars + Coiffure/Beauté)
+    nb_commerces_total = n_distinct(
+      siret[
+        str_starts(code_naf, "47") |                  # Tout le commerce de détail
+        code_naf == "56.30Z"      |                  # Les bars / débits de boissons
+        str_starts(code_naf, "96.02")                # Salons de coiffure et soins de beauté
+      ], 
+      na.rm = TRUE
+    ),
+    
+    # Indicateurs socio-démographique
+    population=first(population),
+    med_uc=first(med_uc),
+    taux_pauv=first(taux_pauv),
+    superficie_km2=first(superficie_km2),
+  .groups="drop",
+    # Distance au centre et géograpqhie
+  superficie_km2=first(superficie_km2),
+  dist_centre_km=first(dist_centre_km)
+  )
+
+
+# Jointure porpre avec la géométrie d'origine
+iris_ff_indicateurs<-contours_iris_clean|>
+  dplyr::select(ID,geometry) |> 
+  inner_join(iris_stats_indicateurs,by="ID") |> 
+  mutate(
+    densite_pop=population/superficie_km2,
+    densite_resto = nb_resto / superficie_km2,
+    deniste_resto_rapide=nb_resto_rapides/superficie_km2,
+    densite_resto_tradi=nb_resto_tradi/superficie_km2,
+    densite_commerce = nb_commerces_total / superficie_km2,
+  ) |> 
+  st_as_sf()
+
+```
+
+## Construction des variables de transport (variables d'intérêts)
+
+
+## Data
+
+**GTFS Naolib** : fichiers du réseau de transport de Nantes Métropole, téléchargés automatiquement dans le dossier `gtfs/` s'ils sont absents. Ce dossier (546 Mo) n'est pas versionné sur GitHub.
+
+**contours_iris** : découpage géographique des quartiers de la commune Nantes (44109)
+
+```{r}
+url_gtfs <- "https://data.nantesmetropole.fr/explore/dataset/244400404_transports_commun_naolib_nantes_metropole_gtfs/files/0cc0469a72de54ee045cb66d1a21de9e/download/"
+
+fichiers_gtfs <- c("stops.txt", "routes.txt", "trips.txt", "stop_times.txt",
+                   "calendar.txt", "calendar_dates.txt", "shapes.txt")
+
+if (!all(file.exists(here("gtfs", fichiers_gtfs)))) {
+  options(timeout = 1200) # Fichier volumineux
+  dir.create(here("gtfs"), showWarnings = FALSE)
+  download.file(url_gtfs, here("gtfs.zip"), mode = "wb")
+  unzip(here("gtfs.zip"), files = fichiers_gtfs, exdir = here("gtfs"))
+  file.remove(here("gtfs.zip"))
+}
+```
+
+```{r}
+stops  <- read_csv(here("gtfs", "stops.txt"),  col_types = cols(stop_id = "c", parent_station = "c"))
+routes <- read_csv(here("gtfs", "routes.txt"), col_types = cols(route_id = "c"))
+trips  <- read_csv(here("gtfs", "trips.txt"),  col_types = cols(.default = "c"))
+cal    <- read_csv(here("gtfs", "calendar.txt"), col_types = cols(service_id = "c"))
+cal_d  <- read_csv(here("gtfs", "calendar_dates.txt"), col_types = cols(service_id = "c"))
+shapes <- read_csv(here("gtfs", "shapes.txt"), col_types = cols(shape_id = "c"))
+stop_times <- fread(here("gtfs", "stop_times.txt"), select = c("trip_id", "stop_id"),
+                    colClasses = "character")
+
+contours_iris <- iris_nantesv2 |>
+  mutate(CODE_IRIS = as.character(CODE_IRIS)) |> # Clé de jointure en texte
+  st_transform(2154)                             # Lambert-93
+
+nrow(contours_iris)     # 97 IRIS
+nchar(contours_iris$CODE_IRIS) |> unique() # 9 caractères
+```
+
+## Jour type
+
+Un mardi de 2026 hors octobre et novembre (mouvements sociaux). Si la date n'est pas couverte par le GTFS, on retient le mardi le plus chargé hors octobre et novembre.
+
+```{r}
+date_souhaitee <- as.Date("2026-12-08") # Jour type fixé : mardi 8 décembre 2026
+
+services_actifs <- function(date) {
+  d    <- as.integer(format(date, "%Y%m%d"))
+  jour <- c("sunday", "monday", "tuesday", "wednesday",
+            "thursday", "friday", "saturday")[as.POSIXlt(date)$wday + 1]
+  base_cal <- cal |>
+    filter(start_date <= d, end_date >= d, .data[[jour]] == 1) |> pull(service_id)
+  ajouts   <- cal_d |> filter(date == d, exception_type == 1) |> pull(service_id)
+  retraits <- cal_d |> filter(date == d, exception_type == 2) |> pull(service_id)
+  union(setdiff(base_cal, retraits), ajouts)
+}
+
+debut <- as.Date(as.character(min(cal$start_date)), "%Y%m%d")
+fin   <- as.Date(as.character(max(cal$end_date)), "%Y%m%d")
+
+date_ref   <- date_souhaitee
+trips_jour <- trips |> filter(service_id %in% services_actifs(date_ref)) # Courses du jour type
+
+# Arrêt si le GTFS ne couvre pas le jour type : les résultats ne seraient plus comparables
+if (date_ref < debut || date_ref > fin || nrow(trips_jour) == 0) {
+  stop("Le GTFS utilisé ne couvre pas le ", format(date_ref, "%d/%m/%Y"),
+       " (période couverte : ", format(debut, "%d/%m/%Y"), " au ", format(fin, "%d/%m/%Y"), "). ",
+       "Utiliser la version archivée du GTFS indiquée dans le README.")
+}
+
+date_ref         # Jour type retenu
+nrow(trips_jour) # Nb de courses ce jour
+```
+
+## Lignes et passages par arrêt
+
+```{r}
+st <- stop_times |>
+  as_tibble() |>
+  inner_join(trips_jour |> dplyr::select(trip_id, route_id), by = "trip_id") # Passages du jour type
+
+passages_arret <- st |> count(stop_id, name = "passages") # Nb de passages par quai
+
+lignes_arret <- st |>
+  distinct(stop_id, route_id) |>
+  left_join(routes |> dplyr::select(route_id, route_type), by = "route_id") # 0 = tram, 3 = bus
+
+rm(stop_times, st); gc()
+```
+
+## Arrêts géolocalisés
+
+```{r}
+arrets <- stops |>
+  filter(is.na(location_type) | location_type == 0) |> # Points d'arrêt (quais)
+  inner_join(passages_arret, by = "stop_id") |>          # Quais desservis le jour type
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326) |>
+  st_transform(2154)
+
+nrow(arrets)
+```
+
+```{r}
+plot(st_geometry(contours_iris), main = "Vérification spatiale")
+plot(st_geometry(arrets), col = "blue", pch = 20, cex = 0.4, add = TRUE)
+```
+
+## Spatial join
+
+```{r}
+arrets_iris <- st_join(arrets, contours_iris |> dplyr::select(CODE_IRIS), join = st_intersects) |>
+  st_drop_geometry() |>
+  filter(!is.na(CODE_IRIS)) # Arrêts situés dans Nantes
+```
+
+## Indicateurs
+
+```{r}
+nb_arrets_iris <- arrets_iris |>
+  group_by(CODE_IRIS) |>
+  summarise(nb_arrets     = n_distinct(stop_name), # Nb d'arrêts par quartier
+            passages_jour = sum(passages))         # Nb de passages sur le jour type
+
+nb_lignes_iris <- arrets_iris |>
+  dplyr::select(CODE_IRIS, stop_id) |>
+  inner_join(lignes_arret, by = "stop_id", relationship = "many-to-many") |>
+  group_by(CODE_IRIS) |>
+  summarise(
+    nb_lignes      = n_distinct(route_id),                   # Nb de lignes différentes par quartier
+    nb_lignes_tram = n_distinct(route_id[route_type == 0]))  # Nb de lignes de tram par quartier
+
+transport_iris <- contours_iris |>
+  st_drop_geometry() |>
+  dplyr::select(CODE_IRIS, NOM_IRIS) |>
+  left_join(nb_arrets_iris, by = "CODE_IRIS") |>
+  left_join(nb_lignes_iris, by = "CODE_IRIS") |>
+  mutate(across(c(nb_arrets, passages_jour, nb_lignes, nb_lignes_tram),
+                ~ replace_na(.x, 0))) # 0 si aucun arrêt
+
+summary(transport_iris)
+sum(transport_iris$passages_jour == 0) # IRIS sans aucun passage
+```
+
+## Proximité : distance au centre du quartier
+
+```{r}
+centres_iris <- st_point_on_surface(contours_iris) # Point au centre de chaque quartier
+
+arret_proche <- st_nearest_feature(centres_iris, arrets) # Arrêt le plus proche (Nantes et communes voisines)
+
+distance_iris <- tibble(
+  CODE_IRIS = centres_iris$CODE_IRIS,
+  dist_arret_m = as.numeric(st_distance(centres_iris, arrets[arret_proche, ], by_element = TRUE))) # Distance en mètres
+
+transport_iris <- transport_iris |>
+  left_join(distance_iris, by = "CODE_IRIS")
+
+summary(transport_iris$dist_arret_m)
+```
+
+## Passages dans un tampon de 400 m
+
+```{r}
+tampons <- contours_iris |>
+  dplyr::select(CODE_IRIS) |>
+  st_buffer(400) |> # IRIS élargi de 400 m, environ 5 min de marche
+  mutate(surface_tampon_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+passages_tampon <- st_join(tampons, arrets |> dplyr::select(passages), join = st_intersects) |>
+  st_drop_geometry() |>
+  group_by(CODE_IRIS, surface_tampon_km2) |>
+  summarise(passages = sum(passages, na.rm = TRUE), .groups = "drop") |>
+  mutate(passages_km2_400m = passages / surface_tampon_km2) |> # Passages par km² de tampon
+  dplyr::select(CODE_IRIS, passages_km2_400m)
+
+transport_iris <- transport_iris |>
+  left_join(passages_tampon, by = "CODE_IRIS")
+
+summary(transport_iris$passages_km2_400m)
+```
+
+## Lignes de tram pour les cartes
+
+```{r}
+lignes_tram <- trips_jour |>
+  inner_join(routes |> filter(route_type == 0), by = "route_id") |>
+  distinct(shape_id, route_short_name) |>
+  inner_join(shapes, by = "shape_id") |>
+  arrange(shape_id, shape_pt_sequence) |>
+  st_as_sf(coords = c("shape_pt_lon", "shape_pt_lat"), crs = 4326) |>
+  group_by(shape_id, route_short_name) |>
+  summarise(do_union = FALSE, .groups = "drop") |>
+  st_cast("LINESTRING") |>
+  group_by(ligne = route_short_name) |>
+  summarise(.groups = "drop") |> # Un tracé par ligne
+  st_transform(2154)
+
+lignes_tram
+```
+
+
+
+#2. Analyse descriptive
+
+
+## Jointure
+
+```{r}
+base <- iris_ff_indicateurs |> 
+  mutate(CODE_IRIS = str_sub(ID, -9)) |> # Code du quartier = 9 derniers caractères de ID
+  left_join(transport_iris |> dplyr::select(-NOM_IRIS), by = "CODE_IRIS")
+
+
+base <- base |> dplyr::select(-CODE_IRIS)
+nrow(base) # 97 quartiers
+ncol(base) # 21 indicateurs 
+```
+
+## Analyse descriptive:
+
+### 2.1
+
+#### 2.1.1 Statistiques descriptives
+
+```{r}
+
+options(scipen = 999)
+base |> 
+  st_drop_geometry() |> 
+  dplyr::select(nb_resto,nb_resto_rapides,nb_resto_tradi,nb_commerces_total,population,taux_pauv,med_uc,dist_centre_km,superficie_km2) |>
+  dplyr::select(where(is.numeric), -any_of("ID")) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valeur") |>
+  group_by(variable) |>
+  summarise(
+    moy = mean(valeur, na.rm = TRUE),
+    med = median(valeur, na.rm = TRUE),
+    sd=sd(valeur,na.rm=TRUE),
+    min = min(valeur, na.rm = TRUE),
+    max = max(valeur, na.rm = TRUE),
+    Na=sum(is.na(valeur)),
+    .groups = "drop"
+  ) |> 
+  mutate(across(c(moy,med,sd,min,max,Na), ~round(.x, 2)))
+
+  
+```
+
+```{r}
+# Offre de restauration rapide sur Nantes 
+
+prop_resto<-tibble(
+  type_resto=c("Restaurant","Rapide","Traditionnelle"),
+  Nombre=c(sum(base$nb_resto),sum(base$nb_resto_rapides),sum(base$nb_resto_tradi)),
+  Proportion=c(sum(base$nb_resto)/sum(base$nb_resto),sum(base$nb_resto_rapides)/sum(base$nb_resto),sum(base$nb_resto_tradi)/sum(base$nb_resto))
+)
+
+print(prop_resto)
+```
+
+```{r}
+# les quartiers avec le plus d'Offres:
+base |> 
+  st_drop_geometry() |> 
+  dplyr::select(NOM_IRIS,nb_resto_rapides) |> 
+  slice_max(nb_resto_rapides,n=5)
+```
+
+```{r}
+
+# 
+base |> 
+  st_drop_geometry() |> 
+  dplyr::select(nb_resto_rapides) |>
+  ggplot()+
+  aes(x=nb_resto_rapides)+
+  geom_bar()+
+  labs(x="Nombre d'établissements dans l'IRIS",
+       y="Nombre d'IRIS",
+       title="Nombre de restaurants rapides par IRIS",
+       capiton= "Source : Calculs auteurs" )+
+  theme_minimal()
+
+```
+
+```{r}
+base |> 
+  st_drop_geometry() |> 
+  dplyr::select(nb_resto_rapides, nb_resto_tradi) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "type_resto",
+    values_to = "nb"
+  ) |>
+  mutate(
+    type_resto = recode(
+      type_resto,
+      nb_resto_rapides = "Restauration rapide (56.10C)",
+      nb_resto_tradi    = "Restauration traditionnelle (56.10A)"
+    ) )|> 
+      ggplot()+
+  aes(x = nb, fill = type_resto)+
+      geom_bar(show.legend = FALSE) +
+  facet_wrap(~ type_resto, ncol = 2) +
+  labs(
+    x = "Nombre d'établissements dans l'IRIS",
+    y = "Nombre d'IRIS",
+    title = "Nombre de restaurants rapides vs traditionnels par IRIS"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+
+```
+
+#### 2.1.2 Analyse bivariée
+
+```{r}
+# Relation bivarié entre valeurs:
+df_num <- base |>
+  st_drop_geometry() |>
+  dplyr::select(nb_resto_rapides,nb_commerces_total,population,taux_pauv,med_uc,dist_centre_km,superficie_km2, -any_of("ID"))
+
+# 2. Matrice de corrélation
+mat_cor <- cor(df_num, use = "pairwise.complete.obs", method = "spearman")
+corrplot(
+  mat_cor,
+  method = "color",       
+  type = "upper",         
+  order = "hclust",
+  col = COL2("RdBu",100),
+  tl.col = "black",       
+  tl.srt = 45,            
+  number.cex = 0.65,      
+  diag = FALSE            
+)
+
+```
+
+#### 2.1.3 Cartes:
+
+```{r}
+# densite de population:
+base |>
+  ggplot() +
+  geom_sf(aes(fill = cut(
+    population,
+    breaks = c(-Inf,500,1000,3000,5000, Inf),
+    labels = c("<500","500-1000", "1000-3000","3000-5000", "5000+")
+  )), color = "white", linewidth = 0.1) +
+  scale_fill_brewer(
+    palette = "OrRd",
+    name = "Population",
+    drop=FALSE
+  ) +
+  labs(
+  title = "Nombre d'habitants",
+  subtitle = "Nantes – Échelle IRIS, 2025",
+  fill = "Restaurants / km²",
+  caption = paste(
+    "Sources : INSEE",
+    "Calculs de l'auteur."
+  ))+
+  theme_void()
+```
+
+```{r}
+base |>
+  mutate(
+    revenu_quartile = cut(
+      med_uc,
+      breaks = quantile(
+        med_uc,
+        probs = seq(0, 1, 0.25),
+        na.rm = TRUE
+      ),
+      include.lowest = TRUE,
+      labels = c("Q1 - Faible", "Q2", "Q3", "Q4 - Élevé")
+    )
+  ) |> 
+  ggplot()+
+  geom_sf(aes(fill = revenu_quartile),
+          color = "white",
+          linewidth = 0.1) +
+  scale_fill_brewer(
+    palette = "YlOrRd",
+    direction = -1,
+    name = "Revenu médian"
+  ) +
+  labs(
+    title = "Distribution spatiale du revenu médian",
+    subtitle = "Répartition par quartiles à l'échelle des IRIS",
+    caption = "Source : INSEE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+```{r}
+# densite des restaurants rapide:
+iris_zero <- base |> filter(nb_resto_rapides == 0)
+
+base |>
+  ggplot() +
+  geom_sf(aes(fill = cut(
+    nb_resto_rapides,
+    breaks = c(-Inf, 0, 2, 5, 10, Inf),
+    labels = c("0", "1-2", "3-5", "6-10", "10+")
+  )), color = "white", linewidth = 0.1) +
+  geom_text_repel(
+    data = iris_zero,
+    aes(label = NOM_IRIS, geometry = geometry),
+    stat = "sf_coordinates",
+    size = 2.2,
+    min.segment.length = 0,
+    max.overlaps = Inf
+  ) +
+  scale_fill_brewer(
+    palette = "OrRd",
+    name = "Nombre Restaurants rapides"
+  ) +
+  labs(
+  title = "Nombre des restaurants rapides",
+  subtitle = "Nantes – Échelle IRIS, 2025",
+  fill = "Restaurants / km²",
+  caption = paste(
+    "Sources : INSEE (contours IRIS),",
+    "Calculs de l'auteur."
+  ))+
+  theme_void()
+   
+```
+
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = deniste_resto_rapide),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Restaurants / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration spatiale des restaurants rapides",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE, SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = densite_commerce),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Commerces (hors Restauration) / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration des commerces",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE, SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+```{r}
+base |>
+  ggplot() +
+  geom_sf(
+    aes(fill = densite_pop),
+    color = "white",
+    linewidth = 0.15
+  ) +
+  scale_fill_viridis_c(
+    option = "inferno",
+    name = "Habitants / km²",
+    na.value = "grey85"
+  ) +
+  labs(
+    title = "Concentration spatiale de la population",
+    subtitle = "Densité par IRIS à Nantes",
+    caption = "Sources : INSEE (2022), SIRENE. Calculs de l'auteur."
+  ) +
+  theme_void()
+```
+
+
+## 2.2 Analyse de la desserte TAN et de son lien avec la restauration rapide
+
+
+# 
+
+Les trois variables dérivées du contrat sont calculées ici, à la fusion :
+
+-   `passages_km2` : passages du jour type par km² d'IRIS ;
+-   `dens_arrets` : arrêts par km² ;
+-   `tram` : 1 si l'IRIS est desservi par au moins une ligne de tram.
+
+```{r}
+contours_iris <- iris_nantesv2 |>
+  st_transform(2154) |> 
+  mutate(CODE_IRIS = as.character(CODE_IRIS)) |> 
+  dplyr::select(CODE_IRIS)
+
+restos <- iris_ff_indicateurs
+if (inherits(restos, "sf")) restos <- st_drop_geometry(restos) # On garde seulement les données
+
+# Code du quartier : colonne CODE_IRIS si elle existe, sinon les 9 derniers caractères de ID
+if ("CODE_IRIS" %in% names(restos)) {
+  restos <- restos |> mutate(CODE_IRIS = as.character(CODE_IRIS))
+} else {
+  restos <- restos |> mutate(CODE_IRIS = str_sub(ID, -9))
+}
+
+base <- restos |> 
+  left_join(transport_iris |> dplyr::select(-NOM_IRIS), by = "CODE_IRIS")
+
+base <- base |> 
+  mutate(passages_km2 = passages_jour / superficie_km2,
+         dens_arrets  = nb_arrets / superficie_km2,
+         tram         = as.integer(nb_lignes_tram > 0),
+         densite_resto_rapide = nb_resto_rapides / superficie_km2)
+
+base_sf <- contours_iris |> left_join(base, by = "CODE_IRIS") # format sf pour les cartes
+
+jour_type   <- date_ref
+
+nrow(base)                     # 97
+sum(is.na(base$passages_jour)) # 0 : la jointure a fonctionné
+```
+
+## Statistiques des variables de transport
+
+```{r}
+stats <- function(x) c(Moyenne = mean(x, na.rm = TRUE), Médiane = median(x, na.rm = TRUE),
+                       `Écart-type` = sd(x, na.rm = TRUE), Minimum = min(x, na.rm = TRUE),
+                       Maximum = max(x, na.rm = TRUE))
+
+base |>
+  dplyr::select(`Passages par jour` = passages_jour,
+         `Passages par km²` = passages_km2,
+         `Passages par km², tampon 400 m` = passages_km2_400m,
+         `Arrêts par km²` = dens_arrets,
+         `Distance à l'arrêt le plus proche (m)` = dist_arret_m) |>
+  map_dfr(stats, .id = "Variable") |>
+  kable(digits = 1, caption = paste("Desserte TAN par IRIS, jour type :",
+                                    format(jour_type, "%d/%m/%Y")))
+```
+
+```{r}
+tibble(
+  Indicateur = c("IRIS desservis par le tram", "IRIS sans aucun passage",
+                 "IRIS à moins de 300 m d'un arrêt"),
+  Valeur = c(sprintf("%d sur %d (%.0f %%)", sum(base$tram), nrow(base), 100 * mean(base$tram)),
+             sprintf("%d", sum(base$passages_jour == 0)),
+             sprintf("%.0f %%", 100 * mean(base$dist_arret_m <= 300)))
+) |>
+  kable()
+```
+
+## Distribution des passages
+
+La distribution des passages est très asymétrique : quelques IRIS concentrent l'essentiel de la desserte. L'histogramme en échelle logarithmique justifie l'usage du log dans les modèles.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+bind_rows(
+  tibble(echelle = "Échelle naturelle", valeur = base$passages_km2),
+  tibble(echelle = "Échelle logarithmique", valeur = log1p(base$passages_km2))
+) |>
+  mutate(echelle = fct_inorder(echelle)) |>
+  ggplot(aes(valeur)) +
+  geom_histogram(bins = 20, fill = "#2b6cb0", color = "white") +
+  facet_wrap(~ echelle, scales = "free_x") +
+  labs(x = "Passages par km² (log(1 + x) à droite)", y = "Nombre d'IRIS",
+       caption = "Source : GTFS Naolib, calculs de l'auteur") +
+  theme_minimal()
+```
+
+**Les dix IRIS les plus desservis**
+
+```{r}
+base |>
+  arrange(desc(passages_km2)) |>
+  slice_head(n = 10) |>
+  dplyr::select(IRIS = NOM_IRIS, `Passages par jour` = passages_jour,
+         `Passages par km²` = passages_km2, `Lignes de tram` = nb_lignes_tram,
+         `Restaurants rapides` = nb_resto_rapides) |>
+  kable(digits = 0, format.args = list(big.mark = " "))
+```
+
+## Restauration rapide selon la desserte en tram
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4.5
+base |>
+  mutate(tram = factor(tram, levels = c(0, 1), labels = c("Sans tram", "Avec tram"))) |>
+  ggplot(aes(tram, densite_resto_rapide + 1)) +
+  geom_boxplot(fill = "#bee3f8", outlier.shape = NA) +
+  geom_jitter(width = 0.15, alpha = 0.5, size = 1.2) +
+  scale_y_log10() +
+  labs(x = NULL, y = "Restaurants rapides par km² (+1, échelle log)",
+       caption = "Sources : SIRENE, GTFS Naolib") +
+  theme_minimal()
+
+base |>
+  group_by(Tram = if_else(tram == 1, "Avec tram", "Sans tram")) |>
+  summarise(IRIS = n(),
+            `Densité moyenne` = mean(densite_resto_rapide),
+            `Densité médiane` = median(densite_resto_rapide)) |>
+  kable(digits = 1)
+```
+
+## Premier aperçu du lien
+
+```{r}
+#| fig-width: 6.5
+#| fig-height: 5
+ggplot(base, aes(passages_km2, densite_resto_rapide + 1)) +
+  geom_point(aes(color = factor(tram, labels = c("Sans tram", "Avec tram")))) +
+  geom_smooth(method = "lm", se = TRUE, color = "grey30") +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(values = c("#90cdf4", "#c53030"), name = NULL) +
+  labs(x = "Passages par km² (échelle log)",
+       y = "Restaurants rapides par km² (+1, échelle log)",
+       caption = "Sources : SIRENE, GTFS Naolib") +
+  theme_minimal()
+
+cor(log1p(base$passages_km2), log1p(base$densite_resto_rapide), use = "complete.obs")
+```
+
+## Cartes
+
+Conventions : classes par quartiles (Q1 à Q4, 25 % des IRIS chacune), palette bleue pour la famille transport, titre et source sous chaque carte.
+
+```{r}
+classes_quantiles <- function(x, n = 4) {
+  bornes <- unique(quantile(x, probs = seq(0, 1, length.out = n + 1), na.rm = TRUE))
+  etiquettes <- paste0("Q", seq_len(length(bornes) - 1), " (",
+                       format(round(head(bornes, -1)), big.mark = " ", trim = TRUE), " à ",
+                       format(round(bornes[-1]), big.mark = " ", trim = TRUE), ")")
+  cut(x, breaks = bornes, include.lowest = TRUE, labels = etiquettes)
+}
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_passages <- base_sf |> 
+  mutate(classe = classes_quantiles(passages_km2)) |> 
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  geom_sf(data = lignes_tram, color = "#c53030", linewidth = 0.8) +
+  scale_fill_brewer(palette = "Blues", name = "Passages par km²\n(quartiles)") +
+  labs(title = "Passages de bus et de tram par km² et lignes de tram",
+       caption = paste("Source : GTFS Naolib, jour type du", format(jour_type, "%d/%m/%Y"),
+                       "; lignes de tram en rouge")) +
+  theme_void()
+carte_passages
+```
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_distance <- base_sf |> 
+  mutate(classe = classes_quantiles(dist_arret_m)) |> 
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  scale_fill_brewer(palette = "Blues", direction = -1,
+                    name = "Distance (m)\n(quartiles)") +
+  labs(title = "Distance entre le centre de l'IRIS et l'arrêt le plus proche",
+       caption = "Source : GTFS Naolib, IRIS IGN") +
+  theme_void()
+carte_distance
+```
+
+```{r}
+dir.create(here("cartes"), showWarnings = FALSE)
+ggsave(here("cartes/carte_passages_km2.png"), carte_passages, width = 7, height = 6.5, dpi = 300)
+ggsave(here("cartes/carte_distance_arret.png"), carte_distance, width = 7, height = 6.5, dpi = 300)
+```
+
+## 2.3 Avant les modèles
+
+
+### Matrice de corrélation des variables explicatives
+
+On calcule les corrélations entre les variables qui entreront dans les modèles, sous la même forme (logarithme ou niveau). Une corrélation supérieure à 0,7 en valeur absolue signale un risque de colinéarité.
+
+```{r}
+explicatives <- base |> 
+  mutate(med_uc = as.numeric(med_uc)) |> 
+  transmute(`log(passages/km²)`          = log(passages_km2),
+            `Tram`                       = tram,
+            `Distance à l'arrêt (m)`     = dist_arret_m,
+            `log(densité de population)` = log(densite_pop),
+            `log(revenu médian)`         = log(med_uc),
+            `Densité commerciale`        = densite_commerce,
+            `Distance au centre (km)`    = if ("dist_centre_km" %in% names(base)) dist_centre_km else NA_real_) |> 
+  dplyr::select(where(~ !all(is.na(.x)))) # retire une variable absente de la base
+
+matrice_cor <- cor(explicatives, use = "pairwise.complete.obs")
+
+kable(matrice_cor, digits = 2, caption = "Corrélations entre les variables explicatives")
+```
+
+```{r}
+#| fig-width: 7.5
+#| fig-height: 6
+matrice_cor |> 
+  as.data.frame() |> 
+  rownames_to_column("var1") |> 
+  pivot_longer(-var1, names_to = "var2", values_to = "r") |> 
+  mutate(var1 = factor(var1, levels = colnames(matrice_cor)),
+         var2 = factor(var2, levels = rev(colnames(matrice_cor)))) |> 
+  ggplot(aes(var1, var2, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 3.2) +
+  scale_fill_gradient2(low = "#2b6cb0", mid = "white", high = "#c53030",
+                       limits = c(-1, 1), name = "Corrélation") +
+  labs(x = NULL, y = NULL,
+       title = "Corrélations entre les variables explicatives",
+       caption = "Sources : GTFS Naolib, INSEE, SIRENE ; calcul de l'auteur") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+Paires les plus corrélées, à surveiller dans les modèles :
+
+```{r}
+matrice_cor |> 
+  as.data.frame() |> 
+  rownames_to_column("Variable 1") |> 
+  pivot_longer(-`Variable 1`, names_to = "Variable 2", values_to = "Corrélation") |> 
+  filter(`Variable 1` < `Variable 2`) |> 
+  arrange(desc(abs(Corrélation))) |> 
+  slice_head(n = 5) |> 
+  kable(digits = 2)
+```
+
+### Autocorrélation spatiale de la densité de restaurants rapides
+
+L'indice de Moran global mesure si les quartiers voisins ont des densités de restaurants rapides semblables. Une valeur positive et significative indique une concentration spatiale : les quartiers denses en restauration rapide se regroupent. Deux IRIS sont voisins s'ils partagent une frontière (contiguïté de type « reine »).
+
+```{r}
+base_moran <- base_sf |> filter(!is.na(densite_resto_rapide))
+
+voisins <- poly2nb(base_moran, queen = TRUE)
+poids   <- nb2listw(voisins, style = "W", zero.policy = TRUE)
+
+y_moran <- log1p(base_moran$densite_resto_rapide) # log(1 + x) : certains IRIS n'ont aucun restaurant
+
+moran_test <- moran.test(y_moran, poids, zero.policy = TRUE)
+moran_test
+
+# Version par permutations (999 tirages), plus robuste avec 97 observations
+moran_perm <- moran.mc(y_moran, poids, nsim = 999, zero.policy = TRUE)
+moran_perm
+```
+
+```{r}
+tibble(
+  Indicateur = c("Indice de Moran", "Valeur attendue sans autocorrélation",
+                 "p-value (test analytique)", "p-value (999 permutations)"),
+  Valeur = c(moran_test$estimate[["Moran I statistic"]],
+             moran_test$estimate[["Expectation"]],
+             moran_test$p.value,
+             moran_perm$p.value)
+) |> 
+  kable(digits = 3, caption = "Autocorrélation spatiale de la densité de restaurants rapides (log)")
+```
+
+```{r}
+#| fig-width: 6.5
+#| fig-height: 5.5
+# Diagramme de Moran : densité de l'IRIS (x) et moyenne de ses voisins (y)
+tibble(y = y_moran,
+       y_voisins = lag.listw(poids, y_moran, zero.policy = TRUE)) |> 
+  ggplot(aes(y, y_voisins)) +
+  geom_point(color = "#c05621", alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "grey30") +
+  geom_vline(xintercept = mean(y_moran), linetype = "dashed", color = "grey60") +
+  geom_hline(yintercept = mean(y_moran), linetype = "dashed", color = "grey60") +
+  labs(x = "log(1 + restaurants rapides par km²) de l'IRIS",
+       y = "Moyenne des IRIS voisins",
+       title = "Diagramme de Moran",
+       caption = "Source : SIRENE ; voisinage par contiguïté") +
+  theme_minimal()
+```
+
+### Cartes : lignes de tram et restauration rapide
+
+Conventions : classes par quartiles (Q1 à Q4, 25 % des IRIS chacune), palette orange pour la famille « restauration », bleue pour la famille « transport », titre et source sous chaque carte.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6.5
+carte_densite <- base_sf |> 
+  mutate(classe = classes_quantiles(densite_resto_rapide)) |> 
+  ggplot() +
+  geom_sf(aes(fill = classe), color = "white", linewidth = 0.2) +
+  geom_sf(data = lignes_tram, color = "#c53030", linewidth = 0.8) +
+  scale_fill_brewer(palette = "Oranges", name = "Restaurants rapides\npar km² (quartiles)") +
+  labs(title = "Densité de restaurants rapides et lignes de tramway",
+       caption = "Sources : SIRENE (NAF 56.10C), GTFS Naolib, IRIS IGN ; lignes de tram en rouge") +
+  theme_void()
+carte_densite
+```
+
+```{r}
+ggsave(here("cartes/carte_densite_fastfood_tram.png"), carte_densite, width = 7, height = 6.5, dpi = 300)
+```
+
+
+
+#3. Estimations économétriques
+
+
+```{r}
+restos <- iris_ff_indicateurs
+```
+
+```{r}
+str(restos)
+```
+
+```{r}
+base<-restos |> 
+  st_drop_geometry() |> 
+  mutate(CODE_IRIS = str_sub(ID, -9)) |> 
+  dplyr::select(-NOM_IRIS,-ID) |> 
+  left_join(transport_iris,by="CODE_IRIS") |> 
+  mutate(passages_km2 = passages_jour / superficie_km2,
+          tram= as.integer(nb_lignes_tram > 0)
+         )
+
+```
+
+## Modèle baseline
+
+```{r}
+# 1. Modèle complet en Poisson
+
+modele_baseline <- glm(nb_resto_rapides ~ log(passages_km2) + tram + log(densite_pop) + log(med_uc) +
+                log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)),
+              family = poisson, data = base)
+summary(modele_baseline)
+
+
+
+```
+
+```{r}
+# 2. Surdispersion
+check_overdispersion(modele_baseline)
+```
+
+```{r}
+
+# 3. Binomiale négative si surdispersion
+modele_nb <- glm.nb(nb_resto_rapides ~ log(passages_km2) + tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+
+
+
+odTest(modele_nb)
+```
+
+```{r}
+sum(base$nb_resto_rapides == 0)
+check_zeroinflation(modele_nb)
+```
+
+```{r}
+# 4.Muclicolinéarité
+car::vif(modele_nb)
+```
+
+```{r}
+#5. Rapport de vraisemblance
+base_sans_na <- base |> na.omit()
+m0 <- glm.nb(nb_resto_rapides ~ 1 + offset(log(superficie_km2)), data = base_sans_na)
+anova(m0, modele_nb)
+```
+
+```{r}
+AIC(modele_baseline,modele_nb)
+```
+
+```{r}
+
+#6.Apport de chaque variable
+drop1(modele_nb, test = "Chisq")
+```
+
+```{r}
+# 7.Interprétation du modèle
+options(scipen=999)
+exp(cbind(IRR = coef(modele_nb), confint(modele_nb)))
+```
+
+```{r}
+summary(modele_nb)
+```
+
+### Robustesse:
+
+```{r}
+# modèle brut sans les valeurs manquantes
+base_sans_na<-base |> na.omit()
+modele_nb_brut <- glm.nb(nb_resto_rapides ~ log(passages_km2)+ offset(log(superficie_km2)), data = base_sans_na)
+summary(modele_nb_brut)
+```
+
+```{r}
+modele_400m<-glm.nb(nb_resto_rapides ~ log(passages_km2_400m) + tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+summary(modele_400m)
+```
+
+```{r}
+modele_tram<-glm.nb(nb_resto_rapides ~ tram + log(densite_pop) + log(med_uc) +
+                 log(densite_commerce) + dist_centre_km + offset(log(superficie_km2)), data = base)
+summary(modele_tram)
+```
+
+```{r}
+exp(cbind(IRR = coef(modele_400m), confint(modele_400m)))
+```
+

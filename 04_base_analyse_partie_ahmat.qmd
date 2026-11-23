@@ -9,7 +9,7 @@ execute:
   message: false
 ---
 
-Cette section complète la partie 3.1  dans `04_base_analyse.qmd`. Elle peut être collée à la suite de sa partie (les chunks réutilisent alors son objet `base`) ou exécutée seule : dans ce cas, la fusion est refaite ci-dessous.
+Cette section complète la partie 3.1 dans `04_base_analyse.qmd`. Elle peut être collée à la suite de sa partie (les chunks réutilisent alors son objet `base`) ou exécutée seule : dans ce cas, la fusion est refaite ci-dessous.
 
 # Packages
 
@@ -61,6 +61,7 @@ jour_type   <- readRDS(here("jour_type.rds"))
 nrow(base)                     # 97
 sum(is.na(base$passages_jour)) # 0 : la jointure a fonctionné
 ```
+
 # Statistiques des variables de transport
 
 ```{r}
@@ -215,10 +216,6 @@ ggsave(here("cartes/carte_passages_km2.png"), carte_passages, width = 7, height 
 ggsave(here("cartes/carte_distance_arret.png"), carte_distance, width = 7, height = 6.5, dpi = 300)
 ```
 
-
-
-
-
 # 3.3 Avant les modèles
 
 ```{r}
@@ -352,6 +349,7 @@ carte_densite
 ```{r}
 ggsave(here("cartes/carte_densite_fastfood_tram.png"), carte_densite, width = 7, height = 6.5, dpi = 300)
 ```
+
 # Sauvegarde
 
 ```{r}
